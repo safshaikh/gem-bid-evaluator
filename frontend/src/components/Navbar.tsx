@@ -18,9 +18,6 @@ export const Navbar: React.FC<NavbarProps> = ({ tenderId, cached, degraded }) =>
           <div>
             <div className="flex items-center space-x-2">
               <h1 className="text-lg font-bold tracking-tight text-white">BidParakh</h1>
-              <span className="text-xs bg-indigo-950 text-indigo-300 border border-indigo-800 px-2 py-0.5 rounded-full font-medium">
-                GeM SIH26100
-              </span>
             </div>
             <p className="text-xs text-slate-400">
               Officer-Side Bid Evaluation: <span className="text-indigo-400 font-medium">AI reads, code decides</span>
