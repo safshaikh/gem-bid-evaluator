@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 import uuid
 
-from app.schemas import EvaluationResult, PageText
+from app.schemas import EvaluationResult, OfficerOverride, PageText
 
 CACHE_DIR = Path("cache")
 
@@ -33,6 +33,7 @@ class Tender:
     documents: List[UploadedDoc] = field(default_factory=list)
     bidders: List[BidderPack] = field(default_factory=list)
     evaluation_result: Optional[EvaluationResult] = None
+    overrides: List[OfficerOverride] = field(default_factory=list)
 
 
 # Global in-memory storage of tenders

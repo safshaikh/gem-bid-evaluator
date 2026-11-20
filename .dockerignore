@@ -11,3 +11,5 @@ __pycache__/
 .pytest_cache/
 uploads/
 *.pyc
+node_modules/
+frontend/node_modules/

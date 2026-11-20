@@ -110,6 +110,26 @@ class VoidListItem(BaseModel):
     text: str
 
 
+class OfficerOverride(BaseModel):
+    """Immutable audit record of an officer manual verdict override."""
+    criterion_id: str
+    bidder_name: str
+    old_verdict: Verdict
+    new_verdict: Verdict
+    justification: str
+    officer_name: str = "Procurement Officer"
+    timestamp: str
+
+
+class OverrideRequest(BaseModel):
+    """Payload to record an officer verdict override."""
+    criterion_id: str
+    bidder_name: str
+    new_verdict: Verdict
+    justification: str
+    officer_name: Optional[str] = "Procurement Officer"
+
+
 class EvaluationResult(BaseModel):
     """Complete evaluation report for a tender across all submitted bidders."""
     tender_id: str
@@ -119,4 +139,5 @@ class EvaluationResult(BaseModel):
     void_list: List[VoidListItem] = Field(default_factory=list)
     atc_flags: List[AtcFlag] = Field(default_factory=list)
     results: List[CriterionResult] = Field(default_factory=list)
+    overrides: List[OfficerOverride] = Field(default_factory=list)
     warnings: List[str] = Field(default_factory=list)

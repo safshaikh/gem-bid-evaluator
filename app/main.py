@@ -1,9 +1,14 @@
 """FastAPI main application module for BidParakh tender evaluation."""
 
+from datetime import datetime, timezone
 import html
+import json
+from pathlib import Path
 from typing import List
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile, status
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, Response
+from fastapi.staticfiles import StaticFiles
 
 from app.atc_flag import flag_clause
 from app.config import get_fallback_model, get_model, is_ai_configured
@@ -20,6 +25,7 @@ from app.jobs import (
     save_cached,
 )
 from app.matrix import build_matrix, to_csv, to_html
+from app.pdf_report import generate_pdf_report
 from app.pdf_text import extract_pages
 from app.resolver import resolve_criteria, resolve_void_list
 from app.rules import evaluate
@@ -29,6 +35,9 @@ from app.schemas import (
     Criterion,
     CriterionResult,
     EvaluationResult,
+    OfficerOverride,
+    OverrideRequest,
+    RuleType,
     Verdict,
     VoidListItem,
 )
@@ -37,6 +46,15 @@ app = FastAPI(
     title="BidParakh",
     description="Officer-side GeM bid evaluation: AI reads, code decides.",
     version="1.0.0",
+)
+
+# CORS enabled for local frontend development
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 
@@ -184,6 +202,7 @@ def evaluate_tender_endpoint(tender_id: str) -> EvaluationResult:
             ],
             warnings=["AINotConfigured"],
         )
+        save_cached(ckey, degraded_res)
         tender.evaluation_result = degraded_res
         return degraded_res
 
@@ -212,6 +231,7 @@ def evaluate_tender_endpoint(tender_id: str) -> EvaluationResult:
             ],
             warnings=[exc_name],
         )
+        save_cached(ckey, degraded_res)
         tender.evaluation_result = degraded_res
         return degraded_res
 
@@ -344,3 +364,266 @@ def view_report_endpoint(tender_id: str) -> HTMLResponse:
 </html>
 """
     return HTMLResponse(content=page)
+
+
+@app.post("/tenders/{tender_id}/override", response_model=EvaluationResult)
+def override_verdict_endpoint(tender_id: str, req: OverrideRequest) -> EvaluationResult:
+    """Record an officer manual verdict override with statutory justification without mutating rule verdicts."""
+    tender = get_tender(tender_id)
+    if not tender:
+        raise HTTPException(status_code=404, detail=f"Tender {tender_id} not found")
+    if not tender.evaluation_result:
+        raise HTTPException(status_code=409, detail="Evaluation not yet run for this tender")
+
+    justification = req.justification.strip()
+    if len(justification) < 20:
+        raise HTTPException(
+            status_code=400,
+            detail="Justification must be at least 20 characters long.",
+        )
+
+    orig_res = next(
+        (
+            r
+            for r in tender.evaluation_result.results
+            if r.criterion_id == req.criterion_id and r.bidder_name == req.bidder_name
+        ),
+        None,
+    )
+    if not orig_res:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Result not found for criterion '{req.criterion_id}' and bidder '{req.bidder_name}'.",
+        )
+
+    override = OfficerOverride(
+        criterion_id=req.criterion_id,
+        bidder_name=req.bidder_name,
+        old_verdict=orig_res.verdict,
+        new_verdict=req.new_verdict,
+        justification=justification,
+        officer_name=req.officer_name or "Procurement Officer",
+        timestamp=datetime.now(timezone.utc).isoformat(),
+    )
+
+    # Append to immutable override audit list (never mutates original rule verdict in results)
+    tender.overrides.append(override)
+    tender.evaluation_result.overrides.append(override)
+
+    # Update cache if key exists
+    ckey = cache_key(tender)
+    save_cached(ckey, tender.evaluation_result)
+
+    return tender.evaluation_result
+
+
+@app.get("/tenders/{tender_id}/export/pdf")
+def export_report_pdf(tender_id: str) -> Response:
+    """Export executive evaluation report with summary, matrix, overrides, and speaking orders as PDF."""
+    tender = get_tender(tender_id)
+    if not tender:
+        raise HTTPException(status_code=404, detail=f"Tender {tender_id} not found")
+    if not tender.evaluation_result:
+        raise HTTPException(status_code=409, detail="Evaluation not yet run for this tender")
+
+    pdf_bytes = generate_pdf_report(tender)
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="evaluation_report_{tender_id[:8]}.pdf"'},
+    )
+
+
+@app.post("/tenders/demo")
+def load_demo_tender() -> dict:
+    """Load IIT Kanpur hero tender fixture and 3 synthetic bidders for instant demonstration."""
+    fixtures_dir = Path("fixtures")
+    main_bid = fixtures_dir / "GEM-2026-B-7945477-main-bid.pdf"
+    corrigendum = fixtures_dir / "GEM-2026-B-7945477-C5-corrigendum.pdf"
+
+    if not main_bid.is_file() or not corrigendum.is_file():
+        raise HTTPException(status_code=404, detail="Hero fixture files missing on disk")
+
+    tender = create_tender()
+    for fpath in (main_bid, corrigendum):
+        content = fpath.read_bytes()
+        pages = extract_pages(content)
+        tender.documents.append(UploadedDoc(name=fpath.name, bytes_data=content, pages=pages))
+
+    bidders_data = [
+        ("PassBidder Pvt Ltd", fixtures_dir / "bidder_pass.pdf"),
+        ("FailBidder Pvt Ltd", fixtures_dir / "bidder_fail.pdf"),
+        ("ReviewBidder Pvt Ltd", fixtures_dir / "bidder_review.pdf"),
+    ]
+    for b_name, b_path in bidders_data:
+        if b_path.is_file():
+            b_bytes = b_path.read_bytes()
+            b_pages = extract_pages(b_bytes)
+            tender.bidders.append(
+                BidderPack(
+                    name=b_name,
+                    documents=[UploadedDoc(name=b_path.name, bytes_data=b_bytes, pages=b_pages)],
+                )
+            )
+
+    # Use offline golden fixtures for instant and reliable evaluation
+    golden_criteria = [
+        Criterion(
+            id="exp_orders",
+            title="Past Experience (Completed Government Orders)",
+            rule_type=RuleType.MIN_COUNT.value,
+            threshold=2,
+            unit="orders",
+            source_doc="GEM-2026-B-7945477-C5-corrigendum.pdf",
+            source_page=2,
+            source_quote="at least two orders from IITs, NITs or any other government organisation",
+            supersedes=["GEM-2026-B-7945477-main-bid.pdf"],
+        ),
+        Criterion(
+            id="oem_authorisation",
+            title="Manufacturer / OEM Authorization",
+            rule_type=RuleType.OEM_OR_AUTHORISED.value,
+            source_doc="GEM-2026-B-7945477-C5-corrigendum.pdf",
+            source_page=1,
+            source_quote="Authorisation Form / Certificate with OEM details furnished",
+        ),
+        Criterion(
+            id="liquidation_undertaking",
+            title="Financial Standing / No-Liquidation Undertaking",
+            rule_type=RuleType.UNDERTAKING_PRESENT.value,
+            source_doc="GEM-2026-B-7945477-C5-corrigendum.pdf",
+            source_page=1,
+            source_quote="undertaking to the effect of financial standing and no liquidation",
+        ),
+    ]
+
+    golden_results = [
+        # PassBidder
+        CriterionResult(
+            bidder_name="PassBidder Pvt Ltd",
+            criterion_id="exp_orders",
+            verdict=Verdict.PASS,
+            reason="Verified count 2 meets or exceeds required threshold 2.",
+            evidence_page=1,
+            evidence_quote="Successfully completed 2 government orders for IT equipment.",
+        ),
+        CriterionResult(
+            bidder_name="PassBidder Pvt Ltd",
+            criterion_id="oem_authorisation",
+            verdict=Verdict.PASS,
+            reason="OEM authorisation document is present in bidder pack.",
+            evidence_page=1,
+            evidence_quote="Authorisation Form / Certificate with OEM details furnished.",
+        ),
+        CriterionResult(
+            bidder_name="PassBidder Pvt Ltd",
+            criterion_id="liquidation_undertaking",
+            verdict=Verdict.PASS,
+            reason="Undertaking document is present in bidder pack.",
+            evidence_page=1,
+            evidence_quote="Undertaking to the effect of financial standing and no liquidation.",
+        ),
+        # FailBidder
+        CriterionResult(
+            bidder_name="FailBidder Pvt Ltd",
+            criterion_id="exp_orders",
+            verdict=Verdict.FAIL,
+            reason="Verified count 1 is below required threshold 2.",
+            evidence_page=1,
+            evidence_quote="Successfully completed 1 order only for IT equipment.",
+            speaking_order_line="The bid of FailBidder Pvt Ltd is rejected under Past Experience (Completed Government Orders) (GEM-2026-B-7945477-C5-corrigendum.pdf, page 2): Verified count 1 is below required threshold 2. Criterion as per tender: at least two orders from IITs, NITs or any other government organisation",
+        ),
+        CriterionResult(
+            bidder_name="FailBidder Pvt Ltd",
+            criterion_id="oem_authorisation",
+            verdict=Verdict.FAIL,
+            reason="The tender makes an offer liable to rejection when a sought document is not uploaded. OEM authorisation document missing.",
+            evidence_page=1,
+            evidence_quote="Not applicable / Reseller without OEM authorization.",
+            speaking_order_line="The bid of FailBidder Pvt Ltd is rejected under Manufacturer / OEM Authorization (GEM-2026-B-7945477-C5-corrigendum.pdf, page 1): The tender makes an offer liable to rejection when a sought document is not uploaded. OEM authorisation document missing. Criterion as per tender: Authorisation Form / Certificate with OEM details furnished",
+        ),
+        CriterionResult(
+            bidder_name="FailBidder Pvt Ltd",
+            criterion_id="liquidation_undertaking",
+            verdict=Verdict.PASS,
+            reason="Undertaking document is present in bidder pack.",
+            evidence_page=1,
+            evidence_quote="Undertaking to the effect of financial standing and no liquidation.",
+        ),
+        # ReviewBidder
+        CriterionResult(
+            bidder_name="ReviewBidder Pvt Ltd",
+            criterion_id="exp_orders",
+            verdict=Verdict.REVIEW,
+            reason="No verified evidence found. Quote verification failed against PDF text layer.",
+            evidence_page=1,
+            evidence_quote="Successfully completed two commercial contracts in hardware supply.",
+        ),
+        CriterionResult(
+            bidder_name="ReviewBidder Pvt Ltd",
+            criterion_id="oem_authorisation",
+            verdict=Verdict.REVIEW,
+            reason="Needs officer judgement. Non-standard reseller authorization document.",
+        ),
+        CriterionResult(
+            bidder_name="ReviewBidder Pvt Ltd",
+            criterion_id="liquidation_undertaking",
+            verdict=Verdict.PASS,
+            reason="Undertaking document is present in bidder pack.",
+        ),
+    ]
+
+    golden_flags = [
+        AtcFlag(
+            clause_text="At least two orders from IITs, NITs or any other government organisation",
+            matched_void_index=8,
+            verdict="REVIEW",
+            reason="Clause is ambiguous: specifies particular organizations (IITs/NITs) but also permits any government organisation. Disclaimer item 8.",
+            clause_quote="orders from IITs, NITs",
+            void_quote="seeking experience from a specific organisation only",
+        ),
+        AtcFlag(
+            clause_text="Dedicated toll-free number for service support",
+            matched_void_index=None,
+            verdict="CLEAR",
+            reason="Standard commercial support requirement; does not violate any GeM disclaimer item.",
+            clause_quote="",
+            void_quote="",
+        ),
+    ]
+
+    void_list = [
+        VoidListItem(
+            index=i,
+            source_page=3,
+            source_quote=f"Disclaimer Category {i}",
+            text=f"GeM Disclaimer Category {i}: Restrictive/anti-competitive procurement condition",
+        )
+        for i in range(1, 15)
+    ]
+
+    eval_res = EvaluationResult(
+        tender_id=tender.tender_id,
+        cached=True,
+        degraded=False,
+        criteria=golden_criteria,
+        void_list=void_list,
+        atc_flags=golden_flags,
+        results=golden_results,
+        overrides=[],
+        warnings=[],
+    )
+    tender.evaluation_result = eval_res
+    save_cached(cache_key(tender), eval_res)
+
+    return {
+        "tender_id": tender.tender_id,
+        "evaluation": eval_res,
+    }
+
+
+# Static frontend mount
+FRONTEND_DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
+if FRONTEND_DIST.is_dir():
+    app.mount("/", StaticFiles(directory=str(FRONTEND_DIST), html=True), name="frontend")
+
