@@ -6,7 +6,7 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile, status
 from fastapi.responses import HTMLResponse, Response
 
 from app.atc_flag import flag_clause
-from app.config import get_model, is_ai_configured
+from app.config import get_fallback_model, get_model, is_ai_configured
 from app.evidence_guard import apply_guard
 import app.gemini_client as gemini_client
 from app.jobs import (
@@ -47,6 +47,7 @@ def health() -> dict:
         "status": "ok",
         "ai_configured": is_ai_configured(),
         "model": get_model(),
+        "fallback_model": get_fallback_model(),
     }
 
 

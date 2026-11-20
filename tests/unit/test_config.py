@@ -85,3 +85,4 @@ def test_health_endpoint() -> None:
     assert data["status"] == "ok"
     assert isinstance(data["ai_configured"], bool)
     assert data["model"] == get_model()
+    assert data["fallback_model"] == get_fallback_model()

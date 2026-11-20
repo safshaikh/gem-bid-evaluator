@@ -5,12 +5,21 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
+# Create a non-root system user and group
+RUN groupadd -r appuser && useradd -r -g appuser -u 1000 appuser
+
 # Install pinned dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application source and fixtures
 COPY . .
+
+# Ensure cache directory exists and non-root user owns the application directory
+RUN mkdir -p /app/cache && chown -R appuser:appuser /app
+
+# Switch to non-root user
+USER appuser
 
 EXPOSE 8080
 
