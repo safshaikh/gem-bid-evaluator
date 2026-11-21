@@ -1,4 +1,10 @@
-import { EvaluationResult, Verdict } from './types';
+import {
+  CheckUpdatesResponse,
+  EvaluationResult,
+  IngestedDocument,
+  IngestionSource,
+  Verdict,
+} from './types';
 
 const API_BASE = import.meta.env.VITE_API_BASE || '';
 
@@ -155,3 +161,93 @@ export async function loginUser(username: string, password: string) {
   }
   return res.json() as Promise<{ access_token: string; token_type: string; role: string }>;
 }
+
+export async function fetchSources(): Promise<IngestionSource[]> {
+  const token = localStorage.getItem('bidparakh_jwt');
+  const headers: Record<string, string> = {};
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+
+  const res = await fetch(`${API_BASE}/tenders/sources`, { headers });
+  if (!res.ok) throw new Error('Failed to fetch ingestion sources');
+  return res.json();
+}
+
+export async function ingestFromSource(
+  source: string,
+  bidId: string
+): Promise<{
+  tender_id: string;
+  bid_id: string;
+  documents: IngestedDocument[];
+  total_pages: number;
+  is_duplicate?: boolean;
+}> {
+  const token = localStorage.getItem('bidparakh_jwt');
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+
+  const res = await fetch(`${API_BASE}/tenders/from-source`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ source, bid_id: bidId }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Ingestion failed' }));
+    throw new Error(err.detail || 'Failed to ingest tender from source');
+  }
+  return res.json();
+}
+
+export async function checkUpdates(tenderId: string): Promise<CheckUpdatesResponse> {
+  const token = localStorage.getItem('bidparakh_jwt');
+  const headers: Record<string, string> = {};
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+
+  const res = await fetch(`${API_BASE}/tenders/${tenderId}/check-updates`, {
+    method: 'POST',
+    headers,
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Check updates failed' }));
+    throw new Error(err.detail || 'Failed to check updates');
+  }
+  return res.json();
+}
+
+export async function applyUpdates(
+  tenderId: string
+): Promise<{ applied: boolean; applied_count: number; status: string; documents: any[] }> {
+  const token = localStorage.getItem('bidparakh_jwt');
+  const headers: Record<string, string> = {};
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+
+  const res = await fetch(`${API_BASE}/tenders/${tenderId}/apply-updates`, {
+    method: 'POST',
+    headers,
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Apply updates failed' }));
+    throw new Error(err.detail || 'Failed to apply updates');
+  }
+  return res.json();
+}
+
+export async function publishNextCorrigendum(
+  bidId: string
+): Promise<{ published: boolean; new_corrigendum?: string; reason?: string }> {
+  const token = localStorage.getItem('bidparakh_jwt');
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+
+  const res = await fetch(`${API_BASE}/mock-gem/publish-next`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ bid_id: bidId }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Publish failed' }));
+    throw new Error(err.detail || 'Failed to publish next corrigendum');
+  }
+  return res.json();
+}
+

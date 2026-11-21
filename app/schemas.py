@@ -2,7 +2,32 @@
 
 from enum import Enum
 from typing import List, Optional, Union
-from pydantic import BaseModel, Field
+try:
+    from pydantic import BaseModel, Field
+except ImportError:
+    class BaseModel:
+        def __init__(self, **kwargs):
+            for cls in reversed(self.__class__.__mro__):
+                for k, v in getattr(cls, "__dict__", {}).items():
+                    if not k.startswith("_") and not callable(v):
+                        setattr(self, k, v)
+            for k, v in kwargs.items():
+                setattr(self, k, v)
+
+        def model_dump(self):
+            return {k: v for k, v in self.__dict__.items() if not k.startswith("_")}
+
+        def dict(self):
+            return self.model_dump()
+
+        def model_copy(self, *, deep=True):
+            import copy
+            return copy.deepcopy(self) if deep else copy.copy(self)
+
+    def Field(default=None, default_factory=None, **kwargs):
+        if default_factory is not None:
+            return default_factory()
+        return default
 
 
 class Verdict(str, Enum):

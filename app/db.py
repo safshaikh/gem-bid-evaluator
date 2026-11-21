@@ -152,9 +152,22 @@ def _migration_002_tamper_evident_audit_log(conn: sqlite3.Connection) -> None:
     """)
 
 
+def _migration_003_add_tender_source_info(conn: sqlite3.Connection) -> None:
+    """Add source_name and source_bid_id columns to tenders table."""
+    cur = conn.cursor()
+    cur.execute("PRAGMA table_info(tenders);")
+    cols = {row["name"] for row in cur.fetchall()}
+    if "source_name" not in cols:
+        conn.execute("ALTER TABLE tenders ADD COLUMN source_name TEXT;")
+    if "source_bid_id" not in cols:
+        conn.execute("ALTER TABLE tenders ADD COLUMN source_bid_id TEXT;")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_tenders_source_bid ON tenders(source_name, source_bid_id);")
+
+
 MIGRATIONS = [
     (1, "001_initial_schema", _migration_001_initial_schema),
     (2, "002_tamper_evident_audit_log", _migration_002_tamper_evident_audit_log),
+    (3, "003_add_tender_source_info", _migration_003_add_tender_source_info),
 ]
 
 
@@ -312,6 +325,8 @@ def db_create_tender(
     tender_id: str,
     title: str = "",
     actor: str = "demo-officer",
+    source_name: Optional[str] = None,
+    source_bid_id: Optional[str] = None,
     db_path: Optional[Path] = None,
 ) -> None:
     """Register tender entity and write audit log."""
@@ -321,10 +336,10 @@ def db_create_tender(
         try:
             conn.execute(
                 """
-                INSERT OR IGNORE INTO tenders (tender_id, title, status, actor, created_at, updated_at)
-                VALUES (?, ?, 'not_evaluated', ?, ?, ?);
+                INSERT OR IGNORE INTO tenders (tender_id, title, status, actor, source_name, source_bid_id, created_at, updated_at)
+                VALUES (?, ?, 'not_evaluated', ?, ?, ?, ?, ?);
                 """,
-                (tender_id, title, actor, now, now),
+                (tender_id, title, actor, source_name, source_bid_id, now, now),
             )
             conn.commit()
         finally:
@@ -334,9 +349,52 @@ def db_create_tender(
         action="tender_created",
         tender_id=tender_id,
         actor=actor,
-        payload={"title": title},
+        payload={"title": title, "source_name": source_name, "source_bid_id": source_bid_id},
         db_path=db_path,
     )
+
+
+def db_update_tender_status(
+    tender_id: str,
+    status: str,
+    db_path: Optional[Path] = None,
+) -> None:
+    """Update tender status string (e.g. 'draft', 'evaluated', 'stale')."""
+    now = datetime.now(timezone.utc).isoformat()
+    with _DB_WRITE_LOCK:
+        conn = get_connection(db_path)
+        try:
+            conn.execute(
+                "UPDATE tenders SET status = ?, updated_at = ? WHERE tender_id = ?;",
+                (status, now, tender_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def db_find_tender_by_source(
+    source_name: str,
+    source_bid_id: str,
+    db_path: Optional[Path] = None,
+) -> Optional[Dict[str, Any]]:
+    """Find tender matching source name and source bid id."""
+    conn = get_connection(db_path)
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT tender_id, title, status, actor, source_name, source_bid_id, created_at, updated_at
+            FROM tenders
+            WHERE source_name = ? AND source_bid_id = ?
+            ORDER BY created_at DESC LIMIT 1;
+            """,
+            (source_name, source_bid_id),
+        )
+        row = cur.fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
 
 
 def db_add_tender_doc(
@@ -637,7 +695,7 @@ def db_list_tenders(db_path: Optional[Path] = None) -> List[Dict[str, Any]]:
         cur = conn.cursor()
         cur.execute(
             """
-            SELECT t.tender_id, t.title, t.status, t.actor, t.created_at, t.updated_at,
+            SELECT t.tender_id, t.title, t.status, t.actor, t.source_name, t.source_bid_id, t.created_at, t.updated_at,
                    COUNT(DISTINCT b.bidder_id) as bidder_count,
                    COUNT(DISTINCT td.doc_id) as document_count
             FROM tenders t
@@ -661,7 +719,7 @@ def db_get_tender_details(
     try:
         cur = conn.cursor()
         cur.execute(
-            "SELECT tender_id, title, status, actor, created_at, updated_at FROM tenders WHERE tender_id = ?;",
+            "SELECT tender_id, title, status, actor, source_name, source_bid_id, created_at, updated_at FROM tenders WHERE tender_id = ?;",
             (tender_id,),
         )
         t_row = cur.fetchone()

@@ -55,21 +55,34 @@ class Tender:
     bidders: List[BidderPack] = field(default_factory=list)
     evaluation_result: Optional[EvaluationResult] = None
     overrides: List[OfficerOverride] = field(default_factory=list)
+    source_name: Optional[str] = None
+    source_bid_id: Optional[str] = None
 
 
 # In-memory dictionary cache for backwards compatibility and high-speed lookups
 tenders_store: Dict[str, Tender] = {}
 
 
-def create_tender(actor: str = "demo-officer", title: str = "") -> Tender:
+def create_tender(
+    actor: str = "demo-officer",
+    title: str = "",
+    source_name: Optional[str] = None,
+    source_bid_id: Optional[str] = None,
+) -> Tender:
     """Create and register a new Tender in both memory and persistent database."""
     init_db()
     tid = uuid.uuid4().hex
-    t = Tender(tender_id=tid)
+    t = Tender(tender_id=tid, source_name=source_name, source_bid_id=source_bid_id)
     tenders_store[tid] = t
 
     try:
-        db_create_tender(tender_id=tid, title=title, actor=actor)
+        db_create_tender(
+            tender_id=tid,
+            title=title,
+            actor=actor,
+            source_name=source_name,
+            source_bid_id=source_bid_id,
+        )
     except Exception as exc:
         logger.warning(f"Failed to persist tender creation to db: {exc}")
 
@@ -155,7 +168,11 @@ def get_tender(tender_id: str) -> Optional[Tender]:
             return None
 
         # Reconstruct tender from database and vault
-        tender = Tender(tender_id=tender_id)
+        tender = Tender(
+            tender_id=tender_id,
+            source_name=details.get("source_name"),
+            source_bid_id=details.get("source_bid_id"),
+        )
 
         # Restore tender documents from vault
         for d in details.get("documents", []):

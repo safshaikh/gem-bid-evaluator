@@ -91,3 +91,45 @@ export interface AuditVerifyResult {
   first_broken_id: number | null;
   reason: string | null;
 }
+
+export interface IngestionSource {
+  name: string;
+  display_name: string;
+  kind: 'demo' | 'local' | 'http';
+  description: string;
+}
+
+export interface IngestedDocument {
+  name: string;
+  published_at: string;
+  kind: 'main' | 'corrigendum';
+  sha256: string;
+  order_index?: number;
+}
+
+export interface TenderDetails {
+  tender_id: string;
+  title: string;
+  status: string;
+  source_name?: string | null;
+  source_bid_id?: string | null;
+  created_at: string;
+  documents: { filename?: string; name?: string; sha256?: string; order_index?: number; page_count?: number }[];
+  bidders: { name: string; documents: { filename?: string; name?: string }[] }[];
+  evaluation?: EvaluationResult | null;
+  overrides: OfficerOverride[];
+}
+
+export interface CorrigendumUpdate {
+  name: string;
+  published_at: string;
+  sequence: number;
+  sha256: string;
+}
+
+export interface CheckUpdatesResponse {
+  updates_available: boolean;
+  reason?: string;
+  new_corrigenda: CorrigendumUpdate[];
+}
+

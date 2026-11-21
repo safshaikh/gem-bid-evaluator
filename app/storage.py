@@ -37,6 +37,7 @@ class LocalStorageProvider:
 
     def __init__(self, vault_dir: Optional[Path] = None):
         self.vault_dir = vault_dir or get_vault_dir()
+        self.vault_dir.mkdir(parents=True, exist_ok=True)
 
     def _file_path(self, digest: str) -> Path:
         # Enforce valid sha256 hex string to prevent any path injection

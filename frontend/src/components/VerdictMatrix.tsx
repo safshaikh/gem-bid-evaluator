@@ -7,6 +7,7 @@ interface VerdictMatrixProps {
   results: CriterionResult[];
   overrides: OfficerOverride[];
   bidders: string[];
+  isStale?: boolean;
   onSelectCell: (criterion: Criterion, bidderName: string, result?: CriterionResult, override?: OfficerOverride) => void;
 }
 
@@ -15,6 +16,7 @@ export const VerdictMatrix: React.FC<VerdictMatrixProps> = ({
   results,
   overrides,
   bidders,
+  isStale,
   onSelectCell,
 }) => {
   // Build fast lookups
@@ -61,6 +63,12 @@ export const VerdictMatrix: React.FC<VerdictMatrixProps> = ({
           </p>
         </div>
         <div className="flex items-center space-x-3 text-xs">
+          {isStale && (
+            <span className="inline-flex items-center px-2.5 py-1 rounded-md text-xs font-bold bg-amber-100 text-amber-900 border border-amber-300 shadow-2xs">
+              <AlertCircle className="w-3.5 h-3.5 mr-1 text-amber-700" />
+              Stale: re-run evaluation
+            </span>
+          )}
           <span className="flex items-center text-emerald-700 font-medium">
             <CheckCircle className="w-3.5 h-3.5 mr-1 text-emerald-600" /> PASS
           </span>

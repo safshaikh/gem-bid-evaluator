@@ -19,6 +19,7 @@ from app.auth import (
 )
 from app.db import (
     GENESIS_HASH,
+    MIGRATIONS,
     append_audit,
     canonical_payload_str,
     compute_audit_hash,
@@ -86,7 +87,7 @@ class TestPersistence(unittest.TestCase):
         cur.execute("SELECT COUNT(*) FROM schema_version;")
         migration_count = cur.fetchone()[0]
         conn.close()
-        self.assertEqual(migration_count, 2)
+        self.assertEqual(migration_count, len(MIGRATIONS))
 
     def test_vault_deduplication_and_path_traversal(self):
         """Vault stores by SHA-256 deduplicated, sanitizes filenames, and resists path traversal."""

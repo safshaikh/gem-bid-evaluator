@@ -115,4 +115,57 @@ BidParakh utilizes a standard library SQLite database (`app/db.py`) and a conten
 | `GEMINI_MODEL` | `gemini-3.8-flash` | Primary Gemini model for extraction and multimodal vision. |
 | `GEMINI_FALLBACK_MODEL` | `gemini-3.5-flash-lite` | Secondary fallback model. |
 
+---
+
+## Ingestion & GeM Sources
+
+BidParakh includes a pluggable ingestion layer (`app/gem_fetcher.py`) that ingests tender packages, validates manifests, enforces chronological corrigenda ordering, and monitors for subsequent amendments.
+
+### Registered Sources
+
+| Source Identifier | Implementation | Purpose |
+| :--- | :--- | :--- |
+| `demo` | `MockGemSource` | Curated sample bids in `data/mock_gem/` (e.g. `GEM/2026/B/DEMO0001` with progressive corrigenda). |
+| `local` | `LocalFolderSource` | Ingests from a local inbox directory (`data/gem_inbox/` or configured root). |
+| `http` | `HttpGemSource` | *(Disabled / Stub)* Raises `NotImplementedError`. Automated web scraping or direct HTTP extraction of the live GeM portal is disabled due to authorization, CAPTCHA, and portal terms of use boundaries. |
+
+### Manifest Format & Invariants
+
+Local and mock tender packets reside in directories mapped from Bid IDs (e.g., `GEM/2026/B/DEMO0001` -> `GEM_2026_B_DEMO0001/`) containing a `manifest.json`:
+
+```json
+{
+  "title": "Supply and Maintenance of High-Capacity Enterprise Networking Switches",
+  "main_document": {
+    "filename": "tender_notice_main.pdf",
+    "published_at": "2026-08-01T10:00:00Z"
+  },
+  "corrigenda": [
+    {
+      "filename": "corrigendum_1_turnover.pdf",
+      "published_at": "2026-08-10T11:00:00Z",
+      "sequence": 1
+    },
+    {
+      "filename": "corrigendum_2_experience.pdf",
+      "published_at": "2026-08-18T15:30:00Z",
+      "sequence": 2
+    }
+  ],
+  "unpublished_corrigenda": [
+    {
+      "filename": "corrigendum_3_late_support.pdf",
+      "published_at": "2026-08-25T16:00:00Z",
+      "sequence": 3
+    }
+  ]
+}
+```
+
+- **Chronological Sorting Guarantee:** Irrespective of the order listed in `manifest.json`, documents are strictly sorted by `published_at` ascending, breaking ties by `sequence` and `filename`.
+- **Idempotency:** Ingesting an identical `(source, bid_id)` returns the existing tender without duplicating documents in the vault or rows in SQLite.
+- **Corrigenda Tracking & Stale Detection:** When a newer corrigendum is detected (`POST /tenders/{id}/check-updates`), applying it (`POST /tenders/{id}/apply-updates`) adds the file to the tender in sequence, records a tamper-evident audit entry, and sets the tender status to `stale` until re-evaluated.
+- **Security Boundaries:** Bid IDs are strictly validated (`^[a-zA-Z0-9/\-_]{1,64}$`), path separators are sanitized, and all resolved paths must remain inside the configured source directory. Direct live portal scraping is prohibited.
+
+
 

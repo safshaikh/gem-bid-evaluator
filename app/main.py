@@ -21,16 +21,28 @@ from app.auth import (
 )
 from app.config import get_fallback_model, get_model, is_ai_configured
 from app.db import (
+    append_audit,
+    db_find_tender_by_source,
     db_get_latest_evaluation,
     db_get_overrides,
     db_get_tender_audit,
     db_get_tender_details,
     db_list_tenders,
     db_save_override,
+    db_update_tender_status,
+    get_connection,
     init_db,
     verify_audit_chain,
 )
 from app.evidence_guard import apply_guard
+from app.gem_fetcher import (
+    CorruptPacketError,
+    IngestionError,
+    InvalidBidIdError,
+    MockGemSource,
+    get_source,
+    list_enabled_sources,
+)
 import app.gemini_client as gemini_client
 from app.jobs import (
     BidderPack,
@@ -54,6 +66,7 @@ from app.vision_client import extract_scanned_bidder_evidence
 from app.schemas import (
     AtcClause,
     AtcFlag,
+    BaseModel,
     Criterion,
     CriterionResult,
     EvaluationResult,
@@ -63,6 +76,16 @@ from app.schemas import (
     Verdict,
     VoidListItem,
 )
+
+
+class FromSourceRequest(BaseModel):
+    source: str
+    bid_id: str
+
+
+class PublishNextRequest(BaseModel):
+    bid_id: str
+
 
 app = FastAPI(
     title="BidParakh",
@@ -203,12 +226,283 @@ def get_tender_endpoint(tender_id: str, request: Request) -> dict:
         "tender_id": tender_id,
         "title": details.get("title", "") if details else "",
         "status": details.get("status", "not_evaluated") if details else "not_evaluated",
+        "source_name": details.get("source_name") if details else (tender.source_name if tender else None),
+        "source_bid_id": details.get("source_bid_id") if details else (tender.source_bid_id if tender else None),
         "created_at": details.get("created_at") if details else "",
         "documents": details.get("documents", []) if details else [{"filename": d.name} for d in tender.documents],
         "bidders": details.get("bidders", []) if details else [{"name": b.name, "documents": [{"filename": d.name} for d in b.documents]} for b in tender.bidders],
         "evaluation": eval_data,
         "overrides": overrides,
     }
+
+
+@app.get("/tenders/sources")
+def list_sources_endpoint(request: Request) -> List[dict]:
+    """List enabled tender ingestion sources."""
+    get_actor(request)
+    return list_enabled_sources()
+
+
+@app.post("/tenders/from-source")
+def ingest_from_source_endpoint(req: FromSourceRequest, request: Request) -> dict:
+    """Ingest a tender package from a registered source (Mock or Local folder)."""
+    actor_info = get_actor(request, require_write=True)
+    actor = actor_info["username"]
+
+    # 1. Validate and resolve source
+    try:
+        source_inst = get_source(req.source)
+    except NotImplementedError as exc:
+        raise HTTPException(status_code=501, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    # 2. Check if already ingested (idempotent)
+    existing = db_find_tender_by_source(req.source, req.bid_id)
+    if existing:
+        details = db_get_tender_details(existing["tender_id"])
+        docs = details.get("documents", []) if details else []
+        return {
+            "tender_id": existing["tender_id"],
+            "bid_id": req.bid_id,
+            "source": req.source,
+            "documents": [
+                {
+                    "name": d["filename"],
+                    "sha256": d["sha256"],
+                    "order_index": d["order_index"],
+                }
+                for d in docs
+            ],
+            "total_pages": sum(d.get("page_count", 1) for d in docs),
+            "is_duplicate": True,
+        }
+
+    # 3. Resolve packet from source
+    try:
+        packet = source_inst.resolve(req.bid_id)
+    except InvalidBidIdError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except CorruptPacketError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except NotImplementedError as exc:
+        raise HTTPException(status_code=501, detail=str(exc))
+    except IngestionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    # 4. Create tender with source tracking
+    tender = create_tender(
+        actor=actor,
+        title=packet.title,
+        source_name=req.source,
+        source_bid_id=req.bid_id,
+    )
+
+    # 5. Persist documents in order: main doc first (index 0), then corrigenda
+    all_docs = [packet.main_document] + packet.corrigenda
+    ingested_docs = []
+    sha_list = []
+    total_pages = 0
+
+    for idx, doc_item in enumerate(all_docs):
+        pages = extract_pages(doc_item.bytes)
+        persisted = persist_tender_document(
+            tender_id=tender.tender_id,
+            filename=doc_item.name,
+            bytes_data=doc_item.bytes,
+            pages=pages,
+            order_index=idx,
+            actor=actor,
+        )
+        tender.documents.append(persisted)
+        sha_list.append(doc_item.sha256)
+        total_pages += len(pages)
+        ingested_docs.append({
+            "name": doc_item.name,
+            "published_at": doc_item.published_at.isoformat() if doc_item.published_at else "",
+            "kind": doc_item.kind,
+            "sha256": doc_item.sha256,
+        })
+
+    # 6. Audit entry tender_ingested
+    append_audit(
+        action="tender_ingested",
+        tender_id=tender.tender_id,
+        actor=actor,
+        payload={
+            "source": req.source,
+            "bid_id": req.bid_id,
+            "document_shas": sha_list,
+            "document_count": len(all_docs),
+        },
+    )
+
+    return {
+        "tender_id": tender.tender_id,
+        "bid_id": req.bid_id,
+        "documents": ingested_docs,
+        "total_pages": total_pages,
+    }
+
+
+@app.post("/tenders/{tender_id}/check-updates")
+def check_updates_endpoint(tender_id: str, request: Request) -> dict:
+    """Check if newer corrigenda exist for a source-linked tender."""
+    actor_info = get_actor(request)
+    actor = actor_info["username"]
+
+    details = db_get_tender_details(tender_id)
+    if not details:
+        raise HTTPException(status_code=404, detail=f"Tender {tender_id} not found")
+
+    source_name = details.get("source_name")
+    source_bid_id = details.get("source_bid_id")
+
+    if not source_name or not source_bid_id:
+        return {
+            "updates_available": False,
+            "reason": "Tender was uploaded manually, not from a source",
+            "new_corrigenda": [],
+        }
+
+    try:
+        source_inst = get_source(source_name)
+    except NotImplementedError as exc:
+        raise HTTPException(status_code=501, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    known_shas = [d["sha256"] for d in details.get("documents", []) if "sha256" in d]
+
+    try:
+        new_docs = source_inst.list_updates(source_bid_id, known_shas)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Failed to check updates: {exc}")
+
+    updates_avail = len(new_docs) > 0
+    new_corrigenda_json = [
+        {
+            "name": d.name,
+            "published_at": d.published_at.isoformat() if d.published_at else "",
+            "sequence": d.sequence,
+            "sha256": d.sha256,
+        }
+        for d in new_docs
+    ]
+
+    if updates_avail:
+        append_audit(
+            action="corrigendum_detected",
+            tender_id=tender_id,
+            actor=actor,
+            payload={
+                "source": source_name,
+                "bid_id": source_bid_id,
+                "count": len(new_docs),
+                "corrigenda": [d.name for d in new_docs],
+            },
+        )
+
+    return {
+        "updates_available": updates_avail,
+        "new_corrigenda": new_corrigenda_json,
+    }
+
+
+@app.post("/tenders/{tender_id}/apply-updates")
+def apply_updates_endpoint(tender_id: str, request: Request) -> dict:
+    """Apply newly detected corrigenda to tender and mark evaluation status stale."""
+    actor_info = get_actor(request, require_write=True)
+    actor = actor_info["username"]
+
+    details = db_get_tender_details(tender_id)
+    if not details:
+        raise HTTPException(status_code=404, detail=f"Tender {tender_id} not found")
+
+    source_name = details.get("source_name")
+    source_bid_id = details.get("source_bid_id")
+
+    if not source_name or not source_bid_id:
+        raise HTTPException(status_code=400, detail="Tender has no linked source")
+
+    try:
+        source_inst = get_source(source_name)
+    except NotImplementedError as exc:
+        raise HTTPException(status_code=501, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    known_shas = [d["sha256"] for d in details.get("documents", []) if "sha256" in d]
+    new_docs = source_inst.list_updates(source_bid_id, known_shas)
+
+    if not new_docs:
+        return {
+            "applied": False,
+            "message": "No new corrigenda to apply",
+            "documents": details.get("documents", []),
+        }
+
+    start_index = len(details.get("documents", []))
+    tender = get_tender(tender_id)
+
+    applied_names = []
+    for offset, doc_item in enumerate(new_docs):
+        order_idx = start_index + offset
+        pages = extract_pages(doc_item.bytes)
+        persisted = persist_tender_document(
+            tender_id=tender_id,
+            filename=doc_item.name,
+            bytes_data=doc_item.bytes,
+            pages=pages,
+            order_index=order_idx,
+            actor=actor,
+        )
+        if tender:
+            tender.documents.append(persisted)
+        applied_names.append(doc_item.name)
+
+    # Mark tender status as 'stale' in database and memory
+    db_update_tender_status(tender_id, "stale")
+    if tender:
+        tender.status = "stale"
+
+    append_audit(
+        action="corrigendum_applied",
+        tender_id=tender_id,
+        actor=actor,
+        payload={
+            "source": source_name,
+            "bid_id": source_bid_id,
+            "applied_count": len(new_docs),
+            "corrigenda": applied_names,
+        },
+    )
+
+    refreshed = db_get_tender_details(tender_id)
+    return {
+        "applied": True,
+        "applied_count": len(new_docs),
+        "status": "stale",
+        "documents": refreshed.get("documents", []) if refreshed else [],
+    }
+
+
+@app.post("/mock-gem/publish-next")
+def publish_next_endpoint(req: PublishNextRequest, request: Request) -> dict:
+    """Simulate publication of next pending corrigendum on MockGemSource."""
+    get_actor(request, require_write=True)
+    try:
+        source = get_source("demo")
+        if not isinstance(source, MockGemSource):
+            raise HTTPException(status_code=400, detail="Demo source is not MockGemSource")
+        return source.publish_next(req.bid_id)
+    except InvalidBidIdError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
 
 
 @app.get("/tenders/{tender_id}/audit")

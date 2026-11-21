@@ -1,7 +1,27 @@
-import React, { useState } from 'react';
-import { Upload, ArrowUp, ArrowDown, Trash2, Plus, Sparkles, CheckCircle2, Loader2, AlertCircle } from 'lucide-react';
-import { uploadTenderDocuments, addBidderPack, evaluateTender, loadDemoTender } from '../api';
-import { EvaluationResult } from '../types';
+import React, { useState, useEffect } from 'react';
+import {
+  Upload,
+  ArrowUp,
+  ArrowDown,
+  Trash2,
+  Plus,
+  Sparkles,
+  CheckCircle2,
+  Loader2,
+  AlertCircle,
+  Database,
+  Info,
+  FileCheck2,
+} from 'lucide-react';
+import {
+  uploadTenderDocuments,
+  addBidderPack,
+  evaluateTender,
+  loadDemoTender,
+  fetchSources,
+  ingestFromSource,
+} from '../api';
+import { EvaluationResult, IngestedDocument, IngestionSource } from '../types';
 
 interface UploadWizardProps {
   onEvaluationComplete: (res: EvaluationResult) => void;
@@ -14,6 +34,21 @@ interface BidderInput {
 }
 
 export const UploadWizard: React.FC<UploadWizardProps> = ({ onEvaluationComplete }) => {
+  const [sources, setSources] = useState<IngestionSource[]>([
+    { name: 'demo', display_name: 'Demo GeM Source', kind: 'demo', description: 'Curated test tenders in data/mock_gem/' },
+    { name: 'local', display_name: 'Local Folder Source', kind: 'local', description: 'Folder packs in data/gem_inbox/' },
+  ]);
+  const [selectedSource, setSelectedSource] = useState('demo');
+  const [bidIdInput, setBidIdInput] = useState('GEM/2026/B/DEMO0001');
+  const [ingestedTender, setIngestedTender] = useState<{
+    tender_id: string;
+    bid_id: string;
+    documents: IngestedDocument[];
+    total_pages: number;
+    is_duplicate?: boolean;
+  } | null>(null);
+  const [ingestSuccessMsg, setIngestSuccessMsg] = useState<string | null>(null);
+
   const [tenderFiles, setTenderFiles] = useState<File[]>([]);
   const [bidders, setBidders] = useState<BidderInput[]>([
     { id: '1', name: 'Alpha Solutions Pvt Ltd', files: [] }
@@ -21,6 +56,40 @@ export const UploadWizard: React.FC<UploadWizardProps> = ({ onEvaluationComplete
   const [loading, setLoading] = useState(false);
   const [loadingStage, setLoadingStage] = useState('');
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    fetchSources()
+      .then((srcs) => {
+        if (srcs && srcs.length > 0) setSources(srcs);
+      })
+      .catch(() => {});
+  }, []);
+
+  // Fetch packet from registered source
+  const handleFetchFromSource = async () => {
+    if (!bidIdInput.trim()) {
+      setError('Please enter a valid Bid ID (e.g. GEM/2026/B/DEMO0001).');
+      return;
+    }
+    try {
+      setError(null);
+      setLoading(true);
+      setLoadingStage(`Fetching Bid ${bidIdInput.trim()} from ${selectedSource}...`);
+      const res = await ingestFromSource(selectedSource, bidIdInput.trim());
+      setIngestedTender(res);
+      setIngestSuccessMsg(
+        res.is_duplicate
+          ? `Existing tender loaded! Retrieved stored Bid ${res.bid_id} with ${res.documents.length} verified documents.`
+          : `Successfully ingested Bid ${res.bid_id} with ${res.documents.length} documents in sorted chronological order.`
+      );
+    } catch (err: any) {
+      setError(err.message || 'Failed to ingest from source.');
+      setIngestedTender(null);
+    } finally {
+      setLoading(false);
+      setLoadingStage('');
+    }
+  };
 
   // Add tender PDFs
   const handleTenderFilesChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -68,30 +137,33 @@ export const UploadWizard: React.FC<UploadWizardProps> = ({ onEvaluationComplete
 
   // Run full evaluation pipeline
   const handleEvaluate = async () => {
-    if (tenderFiles.length === 0) {
-      setError('Please upload at least one tender document (main bid PDF).');
-      return;
-    }
-    const validBidders = bidders.filter(b => b.name.trim() && b.files.length > 0);
-    if (validBidders.length === 0) {
-      setError('Please configure at least one bidder with an evidence PDF file.');
-      return;
-    }
-
     try {
       setError(null);
       setLoading(true);
-      
-      setLoadingStage('Step 1/3: Ingesting tender documents and extracting PDF text layers...');
-      const tenderResp = await uploadTenderDocuments(tenderFiles);
-      
-      setLoadingStage('Step 2/3: Uploading bidder evidence packs...');
-      for (const b of validBidders) {
-        await addBidderPack(tenderResp.tender_id, b.name, b.files);
+
+      let targetTenderId = ingestedTender?.tender_id;
+
+      if (!targetTenderId) {
+        if (tenderFiles.length === 0) {
+          setError('Please upload at least one tender document (main bid PDF) or fetch from GeM source.');
+          setLoading(false);
+          return;
+        }
+        setLoadingStage('Step 1/3: Ingesting tender documents and extracting PDF text layers...');
+        const tenderResp = await uploadTenderDocuments(tenderFiles);
+        targetTenderId = tenderResp.tender_id;
+      }
+
+      const validBidders = bidders.filter(b => b.name.trim() && b.files.length > 0);
+      if (validBidders.length > 0) {
+        setLoadingStage('Step 2/3: Uploading bidder evidence packs...');
+        for (const b of validBidders) {
+          await addBidderPack(targetTenderId, b.name, b.files);
+        }
       }
 
       setLoadingStage('Step 3/3: Running deterministic rules engine & quote verification...');
-      const result = await evaluateTender(tenderResp.tender_id);
+      const result = await evaluateTender(targetTenderId);
       onEvaluationComplete(result);
     } catch (err: any) {
       setError(err.message || 'An error occurred during evaluation.');
@@ -124,7 +196,7 @@ export const UploadWizard: React.FC<UploadWizardProps> = ({ onEvaluationComplete
         <div>
           <h2 className="text-xl font-bold text-slate-900">Tender Evaluation Workbench</h2>
           <p className="text-sm text-slate-500 mt-1">
-            Upload the main tender notice and subsequent corrigenda in date order, followed by bidder submission packs.
+            Fetch tender packs directly from mock/local GeM sources, or upload PDF files manually in date order.
           </p>
         </div>
         <button
@@ -138,6 +210,82 @@ export const UploadWizard: React.FC<UploadWizardProps> = ({ onEvaluationComplete
         </button>
       </div>
 
+      {/* GeM Pluggable Ingestion Bar */}
+      <div className="p-4 rounded-xl border border-indigo-100 bg-indigo-50/40 space-y-3">
+        <div className="flex items-center space-x-2 text-sm font-bold text-slate-900">
+          <Database className="w-4 h-4 text-indigo-600" />
+          <span>Ingest from GeM Source</span>
+        </div>
+
+        <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
+          <div className="w-full sm:w-56">
+            <select
+              value={selectedSource}
+              onChange={(e) => setSelectedSource(e.target.value)}
+              disabled={loading}
+              className="w-full px-3 py-2 text-xs font-medium rounded-lg border border-slate-300 bg-white text-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+            >
+              {sources.map((s) => (
+                <option key={s.name} value={s.name}>
+                  {s.display_name} ({s.kind})
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div className="flex-1">
+            <input
+              type="text"
+              value={bidIdInput}
+              onChange={(e) => setBidIdInput(e.target.value)}
+              placeholder="e.g. GEM/2026/B/DEMO0001"
+              disabled={loading}
+              className="w-full px-3 py-2 text-xs font-mono rounded-lg border border-slate-300 bg-white text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+            />
+          </div>
+
+          <button
+            type="button"
+            onClick={handleFetchFromSource}
+            disabled={loading}
+            className="px-4 py-2 rounded-lg text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-700 transition-colors disabled:opacity-50 flex items-center justify-center space-x-1.5 shadow-2xs whitespace-nowrap"
+          >
+            {loading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <FileCheck2 className="w-3.5 h-3.5" />}
+            <span>Fetch Tender Pack</span>
+          </button>
+        </div>
+
+        <div className="flex items-center text-xs text-slate-500 italic">
+          <Info className="w-3.5 h-3.5 mr-1 text-slate-400 shrink-0" />
+          <span>Demo data, not connected to the live GeM portal. Pluggable ingestion reads local and mock manifests with cryptographic hash verification.</span>
+        </div>
+
+        {ingestSuccessMsg && (
+          <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-lg text-xs text-emerald-800 space-y-1">
+            <p className="font-semibold flex items-center">
+              <CheckCircle2 className="w-3.5 h-3.5 mr-1 text-emerald-600" />
+              {ingestSuccessMsg}
+            </p>
+            {ingestedTender && (
+              <div className="mt-2 space-y-1">
+                <p className="font-medium text-emerald-900">Documents in chronological order:</p>
+                <ul className="list-disc list-inside space-y-0.5 text-slate-700 font-mono text-[11px]">
+                  {ingestedTender.documents.map((d, i) => (
+                    <li key={i}>
+                      <span className="font-semibold text-slate-900">{d.name}</span>
+                      <span className="text-slate-500 ml-1">
+                        [{d.kind === 'main' ? 'Main Notice' : 'Corrigendum'}]
+                        {d.published_at ? ` (${d.published_at.slice(0, 10)})` : ''}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
       {error && (
         <div className="p-4 rounded-lg bg-red-50 border border-red-200 text-red-800 text-sm flex items-start space-x-3">
           <AlertCircle className="w-5 h-5 text-red-600 flex-shrink-0 mt-0.5" />
@@ -148,16 +296,18 @@ export const UploadWizard: React.FC<UploadWizardProps> = ({ onEvaluationComplete
         </div>
       )}
 
-      {/* Step 1: Tender Documents */}
+      {/* Step 1: Manual Tender Documents (Optional if fetched from source) */}
       <div className="space-y-4">
         <div className="flex items-center justify-between">
           <div>
             <h3 className="text-base font-semibold text-slate-900 flex items-center">
               <span className="h-6 w-6 rounded-full bg-slate-900 text-white text-xs flex items-center justify-center mr-2">1</span>
-              Tender Notice &amp; Corrigenda Documents
+              Tender Notice &amp; Corrigenda Documents (Manual Upload)
             </h3>
             <p className="text-xs text-slate-500 mt-0.5">
-              Order matters! Latest corrigendum supersedes earlier criteria via the chronological resolver.
+              {ingestedTender
+                ? 'Tender packet already loaded above. You can optionally add supplementary files here or proceed directly to evaluation.'
+                : 'Order matters! Latest corrigendum supersedes earlier criteria via the chronological resolver.'}
             </p>
           </div>
           <label className="cursor-pointer inline-flex items-center px-3 py-1.5 rounded-md text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 border border-slate-300 transition-colors">
@@ -169,7 +319,9 @@ export const UploadWizard: React.FC<UploadWizardProps> = ({ onEvaluationComplete
 
         {tenderFiles.length === 0 ? (
           <div className="border-2 border-dashed border-slate-200 rounded-lg p-6 text-center text-slate-400 text-sm">
-            No tender PDFs uploaded. Click &ldquo;Add Tender PDF&rdquo; or load the demo case above.
+            {ingestedTender
+              ? `Using ${ingestedTender.documents.length} verified documents from fetched Bid ${ingestedTender.bid_id}.`
+              : 'No tender PDFs uploaded. Click "Fetch Tender Pack" above or "Add Tender PDF" for manual upload.'}
           </div>
         ) : (
           <ul className="divide-y divide-slate-100 border border-slate-200 rounded-lg overflow-hidden bg-slate-50/50">
@@ -178,42 +330,31 @@ export const UploadWizard: React.FC<UploadWizardProps> = ({ onEvaluationComplete
                 <div className="flex items-center space-x-3 min-w-0">
                   <span className="font-mono text-xs text-slate-400 w-6 text-center font-bold">#{idx + 1}</span>
                   <span className="font-medium text-slate-800 truncate">{file.name}</span>
-                  <span className="text-xs text-slate-400">({(file.size / 1024).toFixed(1)} KB)</span>
-                  {idx === 0 && (
-                    <span className="text-[10px] bg-blue-50 text-blue-700 px-2 py-0.5 rounded border border-blue-200">
-                      Base Tender
-                    </span>
-                  )}
-                  {idx > 0 && (
-                    <span className="text-[10px] bg-purple-50 text-purple-700 px-2 py-0.5 rounded border border-purple-200">
-                      Corrigendum #{idx}
-                    </span>
-                  )}
                 </div>
-                <div className="flex items-center space-x-1">
+                <div className="flex items-center space-x-2">
                   <button
                     type="button"
                     title="Move up"
-                    disabled={idx === 0}
                     onClick={() => moveTenderFile(idx, 'up')}
-                    className="p-1 text-slate-400 hover:text-slate-700 disabled:opacity-30"
+                    disabled={idx === 0}
+                    className="p-1 rounded text-slate-400 hover:text-slate-600 disabled:opacity-30"
                   >
                     <ArrowUp className="w-4 h-4" />
                   </button>
                   <button
                     type="button"
                     title="Move down"
-                    disabled={idx === tenderFiles.length - 1}
                     onClick={() => moveTenderFile(idx, 'down')}
-                    className="p-1 text-slate-400 hover:text-slate-700 disabled:opacity-30"
+                    disabled={idx === tenderFiles.length - 1}
+                    className="p-1 rounded text-slate-400 hover:text-slate-600 disabled:opacity-30"
                   >
                     <ArrowDown className="w-4 h-4" />
                   </button>
                   <button
                     type="button"
-                    title="Remove"
+                    title="Remove file"
                     onClick={() => removeTenderFile(idx)}
-                    className="p-1 text-red-400 hover:text-red-700 ml-2"
+                    className="p-1 rounded text-slate-400 hover:text-red-600"
                   >
                     <Trash2 className="w-4 h-4" />
                   </button>
@@ -224,46 +365,43 @@ export const UploadWizard: React.FC<UploadWizardProps> = ({ onEvaluationComplete
         )}
       </div>
 
-      {/* Step 2: Bidder Submission Packs */}
+      {/* Step 2: Bidder Evidence Packs */}
       <div className="space-y-4">
         <div className="flex items-center justify-between">
           <div>
             <h3 className="text-base font-semibold text-slate-900 flex items-center">
               <span className="h-6 w-6 rounded-full bg-slate-900 text-white text-xs flex items-center justify-center mr-2">2</span>
-              Bidder Technical Submission Packs
+              Bidder Submission Packs
             </h3>
             <p className="text-xs text-slate-500 mt-0.5">
-              Attach one or more supporting technical PDFs per bidder (turnover certificates, OEM authorization, order proofs).
+              Add bidder evidence documents (e.g. audited balance sheet, OEM authorization, certifications).
             </p>
           </div>
           <button
             type="button"
             onClick={addBidderField}
-            className="inline-flex items-center px-3 py-1.5 rounded-md text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 border border-slate-300 transition-colors"
+            className="inline-flex items-center px-3 py-1.5 rounded-md text-xs font-medium text-indigo-700 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 transition-colors"
           >
-            <Plus className="w-3.5 h-3.5 mr-1.5" />
-            Add Another Bidder
+            <Plus className="w-3.5 h-3.5 mr-1" />
+            Add Bidder
           </button>
         </div>
 
         <div className="space-y-3">
           {bidders.map((bidder, idx) => (
-            <div key={bidder.id} className="p-4 border border-slate-200 rounded-lg bg-white flex flex-col md:flex-row md:items-center justify-between gap-4">
-              <div className="flex-1 space-y-1">
-                <label className="block text-xs font-medium text-slate-600">Bidder #{idx + 1} Name</label>
+            <div key={bidder.id} className="p-4 rounded-lg border border-slate-200 bg-slate-50 space-y-3">
+              <div className="flex items-center space-x-3">
+                <span className="font-mono text-xs font-bold text-slate-500">#{idx + 1}</span>
                 <input
                   type="text"
                   value={bidder.name}
                   onChange={(e) => updateBidderName(bidder.id, e.target.value)}
-                  className="w-full text-sm font-semibold text-slate-800 border border-slate-300 rounded px-3 py-1.5 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                  placeholder="e.g. Acme Technologies Pvt Ltd"
+                  placeholder="Bidder Legal Entity Name"
+                  className="flex-1 px-3 py-1.5 rounded-md border border-slate-300 text-sm font-semibold text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500"
                 />
-              </div>
-
-              <div className="flex items-center space-x-3">
-                <label className="cursor-pointer inline-flex items-center px-3 py-2 rounded text-xs font-medium text-indigo-700 bg-indigo-50 border border-indigo-200 hover:bg-indigo-100 transition-colors">
+                <label className="cursor-pointer inline-flex items-center px-3 py-1.5 rounded-md text-xs font-medium text-slate-700 bg-white hover:bg-slate-100 border border-slate-300 transition-colors">
                   <Upload className="w-3.5 h-3.5 mr-1.5" />
-                  {bidder.files.length > 0 ? `${bidder.files.length} PDF(s) attached` : 'Attach PDF(s)'}
+                  Attach Evidence PDFs ({bidder.files.length})
                   <input
                     type="file"
                     multiple
@@ -320,3 +458,4 @@ export const UploadWizard: React.FC<UploadWizardProps> = ({ onEvaluationComplete
     </div>
   );
 };
+
