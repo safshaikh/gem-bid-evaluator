@@ -1,7 +1,6 @@
-"""Generate synthetic bidder evidence PDFs using reportlab and Pillow for offline testing."""
+"""Generate synthetic bidder evidence PDFs using reportlab for offline testing."""
 
 from pathlib import Path
-
 try:
     from PIL import Image, ImageDraw, ImageFilter
     HAS_PIL = True
@@ -72,70 +71,66 @@ def generate_review_pdf(dest: Path) -> None:
 
 
 def generate_scanned_clean_pdf(dest: Path) -> None:
-    """Generate image-only scanned PDF with CA turnover certificate and OEM authorization (zero digital text layer)."""
-    img = Image.new("RGB", (1200, 1600), color=(255, 255, 255))
+    """Generate a clean image-only scanned PDF with turnover and OEM authorisation."""
+    img = Image.new("RGB", (1240, 1754), color=(252, 252, 250))
     draw = ImageDraw.Draw(img)
 
-    draw.rectangle([(40, 40), (1160, 1560)], outline=(180, 180, 180), width=3)
-    draw.text((80, 100), "CHARTERED ACCOUNTANT STATUTORY TURNOVER CERTIFICATE", fill=(20, 20, 20))
-    draw.text((80, 160), "TO WHOMSOEVER IT MAY CONCERN", fill=(40, 40, 40))
-    draw.text((80, 240), "This is to certify that M/s ScannedCleanBidder Pvt Ltd has achieved the following", fill=(30, 30, 30))
-    draw.text((80, 280), "Annual Financial Turnover for the preceding three financial years:", fill=(30, 30, 30))
-    draw.text((120, 360), "1. Financial Year 2023-24: Rs 65,00,000/- (Sixty Five Lakhs Only)", fill=(10, 10, 10))
-    draw.text((120, 420), "2. Financial Year 2022-23: Rs 70,00,000/- (Seventy Lakhs Only)", fill=(10, 10, 10))
-    draw.text((120, 480), "3. Financial Year 2021-22: Rs 60,00,000/- (Sixty Lakhs Only)", fill=(10, 10, 10))
-    draw.text((80, 560), "Average Annual Turnover: Rs 65,00,000/- (Exceeds required threshold)", fill=(20, 20, 20))
-    draw.text((80, 700), "MANUFACTURER AUTHORISATION FORM (OEM AUTHORIZATION)", fill=(20, 20, 20))
-    draw.text((80, 760), "We hereby confirm that ScannedCleanBidder Pvt Ltd is our certified OEM authorized dealer.", fill=(30, 30, 30))
-    draw.text((80, 820), "Authorisation Form / Certificate with OEM details furnished herewith.", fill=(30, 30, 30))
-    draw.text((80, 960), "UNDERTAKING: Undertaking to the effect of financial standing and no liquidation.", fill=(30, 30, 30))
-    draw.text((80, 1100), "[SEAL & SIGNATURE: STATUTORY AUDITOR & CHARTERED ACCOUNTANT]", fill=(60, 60, 60))
+    draw.rectangle([(60, 60), (1180, 1694)], outline=(180, 180, 180), width=2)
+    draw.text((120, 120), "OFFICIAL CHARTERED ACCOUNTANT CERTIFICATE", fill=(20, 20, 20))
+    draw.text((120, 160), "Statutory Turnover & OEM Authorisation Scrutiny Record", fill=(60, 60, 60))
 
-    temp_img = dest.parent / "temp_clean_scan.png"
-    img.save(temp_img, format="PNG")
+    # 1. Turnover details
+    draw.text((120, 260), "1. ANNUAL FINANCIAL TURNOVER (AUDITED):", fill=(0, 0, 0))
+    draw.text((160, 310), "Financial Year 2023-24: INR 65,00,000 (Rupees Sixty Five Lakh)", fill=(30, 30, 30))
+    draw.text((160, 360), "Financial Year 2022-23: INR 70,00,000 (Rupees Seventy Lakh)", fill=(30, 30, 30))
+    draw.text((160, 410), "Financial Year 2021-22: INR 60,00,000 (Rupees Sixty Lakh)", fill=(30, 30, 30))
+    draw.text((160, 460), "Average Annual Turnover: INR 65,00,000 / certified by CA.", fill=(30, 30, 30))
 
-    c = canvas.Canvas(str(dest), pagesize=letter)
-    c.drawImage(str(temp_img), 0, 0, width=letter[0], height=letter[1])
-    c.showPage()
-    c.save()
-    if temp_img.is_file():
-        temp_img.unlink()
+    # 2. OEM Authorization details
+    draw.text((120, 560), "2. MANUFACTURER AUTHORISATION DECLARATION:", fill=(0, 0, 0))
+    draw.text((160, 610), "OEM Authorisation Certificate Form with OEM details furnished.", fill=(30, 30, 30))
+    draw.text((160, 660), "Direct Manufacturer Partnership Validated for IT Hardware.", fill=(30, 30, 30))
+
+    # 3. Undertaking details
+    draw.text((120, 760), "3. UNDERTAKING & FINANCIAL STANDING:", fill=(0, 0, 0))
+    draw.text((160, 810), "Undertaking to the effect of financial standing and no liquidation.", fill=(30, 30, 30))
+
+    # Simulated signature / stamp
+    draw.rectangle([(750, 1350), (1100, 1580)], outline=(30, 60, 180), width=3)
+    draw.text((770, 1380), "[SEAL & STAMP OF AUDITOR]", fill=(30, 60, 180))
+    draw.text((770, 1420), "Signed: R. K. Sharma & Co.", fill=(30, 60, 180))
+    draw.text((770, 1460), "CA Reg: #084920 / Peer Reviewed", fill=(30, 60, 180))
+
+    img.save(str(dest), "PDF", resolution=150.0)
 
 
 def generate_scanned_blurry_pdf(dest: Path) -> None:
-    """Generate deliberately blurry/rotated scanned PDF to test ambiguity and safe degradation."""
-    img = Image.new("RGB", (1200, 1600), color=(245, 245, 245))
+    """Generate a deliberately degraded/blurry and rotated scan PDF."""
+    img = Image.new("RGB", (1240, 1754), color=(240, 240, 238))
     draw = ImageDraw.Draw(img)
-    draw.rectangle([(40, 40), (1160, 1560)], outline=(160, 160, 160), width=2)
-    draw.text((80, 120), "ANNUAL TURNOVER CERTIFICATE (ILLEGIBLE SCAN)", fill=(80, 80, 80))
-    draw.text((80, 220), "Turnover Year 1: Rs ??,00,000 (Blurred and unreadable)", fill=(100, 100, 100))
-    draw.text((80, 300), "Turnover Year 2: Rs 15,00,000 (Low turnover / illegible seal)", fill=(100, 100, 100))
-    draw.text((80, 420), "Authorisation: Reseller authorization not clearly stamped", fill=(100, 100, 100))
 
-    blurred = img.filter(ImageFilter.GaussianBlur(radius=7))
-    rotated = blurred.rotate(15, fillcolor=(255, 255, 255))
+    draw.text((120, 120), "UNVERIFIABLE LOW RESOLUTION CERTIFICATE", fill=(100, 100, 100))
+    draw.text((160, 260), "Turnover FY 23-24: Rs ?0,00,000", fill=(120, 120, 120))
+    draw.text((160, 320), "OEM Authorization: [Illegible smear / unreadable stamp]", fill=(120, 120, 120))
 
-    temp_img = dest.parent / "temp_blurry_scan.png"
-    rotated.save(temp_img, format="PNG")
-
-    c = canvas.Canvas(str(dest), pagesize=letter)
-    c.drawImage(str(temp_img), 0, 0, width=letter[0], height=letter[1])
-    c.showPage()
-    c.save()
-    if temp_img.is_file():
-        temp_img.unlink()
+    degraded = img.filter(ImageFilter.GaussianBlur(radius=9)).rotate(35, expand=False, fillcolor=(240, 240, 240))
+    degraded.save(str(dest), "PDF", resolution=100.0)
 
 
 def make_all_fixtures() -> None:
     """Create all synthetic bidder PDFs inside fixtures/."""
     FIXTURES_DIR.mkdir(parents=True, exist_ok=True)
-    generate_pass_pdf(FIXTURES_DIR / "bidder_pass.pdf")
-    generate_fail_pdf(FIXTURES_DIR / "bidder_fail.pdf")
-    generate_review_pdf(FIXTURES_DIR / "bidder_review.pdf")
-    generate_scanned_clean_pdf(FIXTURES_DIR / "bidder_scanned_clean.pdf")
-    generate_scanned_blurry_pdf(FIXTURES_DIR / "bidder_scanned_blurry.pdf")
+    if HAS_REPORTLAB:
+        generate_pass_pdf(FIXTURES_DIR / "bidder_pass.pdf")
+        generate_fail_pdf(FIXTURES_DIR / "bidder_fail.pdf")
+        generate_review_pdf(FIXTURES_DIR / "bidder_review.pdf")
+    if HAS_PIL:
+        generate_scanned_clean_pdf(FIXTURES_DIR / "bidder_scanned_clean.pdf")
+        generate_scanned_blurry_pdf(FIXTURES_DIR / "bidder_scanned_blurry.pdf")
 
 
 if __name__ == "__main__":
     make_all_fixtures()
-    print("Generated all fixtures including bidder_scanned_clean.pdf and bidder_scanned_blurry.pdf under fixtures/")
+    print("Fixture status in fixtures/:")
+    for f in FIXTURES_DIR.glob("*.pdf"):
+        print(f" - {f.name} ({f.stat().st_size} bytes)")

@@ -11,6 +11,15 @@ def evaluate(criterion: Criterion, evidence: BidderEvidence) -> CriterionResult:
     rtype = criterion.rule_type
     bidder_name = evidence.bidder_name
 
+    # Check if bidder submission contains scanned vision evidence
+    is_scanned_pack = any(
+        getattr(d, "source_kind", "text_layer") == "vision"
+        for d in evidence.documents_present
+    ) or any(
+        getattr(f, "source_kind", "text_layer") == "vision"
+        for f in evidence.fields
+    )
+
     # Rule: MANUAL always returns REVIEW with reason 'Needs officer judgement'
     if rtype == RuleType.MANUAL or rtype == "MANUAL":
         return CriterionResult(
@@ -22,28 +31,38 @@ def evaluate(criterion: Criterion, evidence: BidderEvidence) -> CriterionResult:
 
     # Rule: DOC_PRESENT
     if rtype == RuleType.DOC_PRESENT or rtype == "DOC_PRESENT":
-        present = False
+        present_doc = None
         if criterion.accepted_doc_types:
             accepted_lower = [a.lower() for a in criterion.accepted_doc_types]
-            present = any(d.doc_type.lower() in accepted_lower for d in evidence.documents_present)
-        else:
-            present = len(evidence.documents_present) > 0
+            present_doc = next(
+                (d for d in evidence.documents_present if d.doc_type.lower() in accepted_lower),
+                None,
+            )
+        elif evidence.documents_present:
+            present_doc = evidence.documents_present[0]
 
-        if present:
+        if present_doc:
             return CriterionResult(
                 bidder_name="",
                 criterion_id=criterion.id,
                 verdict=Verdict.PASS,
                 reason="Required document is uploaded and present in bidder pack.",
+                evidence_page=present_doc.page,
+                evidence_quote=present_doc.quote,
+                source_kind=getattr(present_doc, "source_kind", "text_layer"),
+                bounding_box=getattr(present_doc, "bounding_box", None),
             )
-        if any(d.source_kind == "vision" for d in evidence.documents_present) or any(f.source_kind == "vision" for f in evidence.fields):
+
+        # Scanned packs must never automatically FAIL on missing document
+        if is_scanned_pack:
             return CriterionResult(
                 bidder_name="",
                 criterion_id=criterion.id,
                 verdict=Verdict.REVIEW,
-                reason="Value read from scanned image; officer must confirm.",
+                reason="Value read from scanned image; officer must confirm. Document not detected with certainty in scanned pack.",
                 source_kind="vision",
             )
+
         res = CriterionResult(
             bidder_name="",
             criterion_id=criterion.id,
@@ -55,22 +74,31 @@ def evaluate(criterion: Criterion, evidence: BidderEvidence) -> CriterionResult:
 
     # Rule: UNDERTAKING_PRESENT
     if rtype == RuleType.UNDERTAKING_PRESENT or rtype == "UNDERTAKING_PRESENT":
-        present = any(d.doc_type.lower() == "undertaking" for d in evidence.documents_present)
-        if present:
+        present_doc = next(
+            (d for d in evidence.documents_present if d.doc_type.lower() == "undertaking"),
+            None,
+        )
+        if present_doc:
             return CriterionResult(
                 bidder_name="",
                 criterion_id=criterion.id,
                 verdict=Verdict.PASS,
                 reason="Undertaking document is present in bidder pack.",
+                evidence_page=present_doc.page,
+                evidence_quote=present_doc.quote,
+                source_kind=getattr(present_doc, "source_kind", "text_layer"),
+                bounding_box=getattr(present_doc, "bounding_box", None),
             )
-        if any(d.source_kind == "vision" for d in evidence.documents_present) or any(f.source_kind == "vision" for f in evidence.fields):
+
+        if is_scanned_pack:
             return CriterionResult(
                 bidder_name="",
                 criterion_id=criterion.id,
                 verdict=Verdict.REVIEW,
-                reason="Value read from scanned image; officer must confirm.",
+                reason="Value read from scanned image; officer must confirm. Undertaking not detected with certainty in scanned pack.",
                 source_kind="vision",
             )
+
         res = CriterionResult(
             bidder_name="",
             criterion_id=criterion.id,
@@ -82,25 +110,34 @@ def evaluate(criterion: Criterion, evidence: BidderEvidence) -> CriterionResult:
 
     # Rule: OEM_OR_AUTHORISED
     if rtype == RuleType.OEM_OR_AUTHORISED or rtype == "OEM_OR_AUTHORISED":
-        present = any(
-            d.doc_type.lower() in ("oem authorisation", "oem authorization")
-            for d in evidence.documents_present
+        present_doc = next(
+            (
+                d for d in evidence.documents_present
+                if d.doc_type.lower() in ("oem authorisation", "oem authorization", "oem certificate")
+            ),
+            None,
         )
-        if present:
+        if present_doc:
             return CriterionResult(
                 bidder_name="",
                 criterion_id=criterion.id,
                 verdict=Verdict.PASS,
                 reason="OEM authorisation document is present in bidder pack.",
+                evidence_page=present_doc.page,
+                evidence_quote=present_doc.quote,
+                source_kind=getattr(present_doc, "source_kind", "text_layer"),
+                bounding_box=getattr(present_doc, "bounding_box", None),
             )
-        if any(d.source_kind == "vision" for d in evidence.documents_present) or any(f.source_kind == "vision" for f in evidence.fields):
+
+        if is_scanned_pack:
             return CriterionResult(
                 bidder_name="",
                 criterion_id=criterion.id,
                 verdict=Verdict.REVIEW,
-                reason="Value read from scanned image; officer must confirm.",
+                reason="Value read from scanned image; officer must confirm. OEM authorisation document missing or unclear in scanned pack.",
                 source_kind="vision",
             )
+
         res = CriterionResult(
             bidder_name="",
             criterion_id=criterion.id,
@@ -130,46 +167,48 @@ def evaluate(criterion: Criterion, evidence: BidderEvidence) -> CriterionResult:
         if val is None or not isinstance(val, (int, float)):
             val = parse_count(field.raw_text) or 0
         threshold = criterion.threshold or 0.0
+
         if val >= threshold:
-            res = CriterionResult(
+            return CriterionResult(
                 bidder_name="",
                 criterion_id=criterion.id,
                 verdict=Verdict.PASS,
                 reason=f"Verified count {int(val)} meets or exceeds required threshold {int(threshold)}.",
                 evidence_page=field.page,
                 evidence_quote=field.quote,
-                bounding_box=field.bounding_box,
-                source_kind=field.source_kind,
+                source_kind=getattr(field, "source_kind", "text_layer"),
+                bounding_box=getattr(field, "bounding_box", None),
             )
-        else:
-            if field.source_kind == "vision":
-                res = CriterionResult(
-                    bidder_name="",
-                    criterion_id=criterion.id,
-                    verdict=Verdict.REVIEW,
-                    reason="Value read from scanned image; officer must confirm.",
-                    evidence_page=field.page,
-                    evidence_quote=field.quote,
-                    bounding_box=field.bounding_box,
-                    source_kind=field.source_kind,
-                )
-            else:
-                res = CriterionResult(
-                    bidder_name="",
-                    criterion_id=criterion.id,
-                    verdict=Verdict.FAIL,
-                    reason=f"Verified count {int(val)} is below required threshold {int(threshold)}.",
-                    evidence_page=field.page,
-                    evidence_quote=field.quote,
-                    bounding_box=field.bounding_box,
-                    source_kind=field.source_kind,
-                )
-                res.speaking_order_line = line_for(bidder_name, criterion, res)
+
+        # CRITICAL SAFETY RULE: Scan-derived data must NEVER produce an automatic FAIL
+        if getattr(field, "source_kind", "text_layer") == "vision":
+            return CriterionResult(
+                bidder_name="",
+                criterion_id=criterion.id,
+                verdict=Verdict.REVIEW,
+                reason="Value read from scanned image; officer must confirm",
+                evidence_page=field.page,
+                evidence_quote=field.quote,
+                source_kind="vision",
+                bounding_box=getattr(field, "bounding_box", None),
+            )
+
+        res = CriterionResult(
+            bidder_name="",
+            criterion_id=criterion.id,
+            verdict=Verdict.FAIL,
+            reason=f"Verified count {int(val)} is below required threshold {int(threshold)}.",
+            evidence_page=field.page,
+            evidence_quote=field.quote,
+        )
+        res.speaking_order_line = line_for(bidder_name, criterion, res)
         return res
 
     # Rule: MIN_AVG_VALUE
     if rtype == RuleType.MIN_AVG_VALUE or rtype == "MIN_AVG_VALUE":
         yearly_values: List[float] = []
+        is_vision = any(getattr(f, "source_kind", "text_layer") == "vision" for f in valid_fields)
+
         for f in valid_fields:
             if isinstance(f.value, (int, float)):
                 yearly_values.append(float(f.value))
@@ -188,13 +227,12 @@ def evaluate(criterion: Criterion, evidence: BidderEvidence) -> CriterionResult:
                 criterion_id=criterion.id,
                 verdict=Verdict.REVIEW,
                 reason=f"Found {len(yearly_values)} yearly values (fewer than 3 required for 3-year average turnover).",
+                source_kind="vision" if is_vision else "text_layer",
             )
 
         avg_val = sum(yearly_values) / len(yearly_values)
         threshold = criterion.threshold or 0.0
-        is_vision = any(f.source_kind == "vision" for f in valid_fields)
-        first_box = valid_fields[0].bounding_box if valid_fields else None
-        source_kind = "vision" if is_vision else "text_layer"
+        first_field = valid_fields[0]
 
         if avg_val >= threshold:
             return CriterionResult(
@@ -202,18 +240,23 @@ def evaluate(criterion: Criterion, evidence: BidderEvidence) -> CriterionResult:
                 criterion_id=criterion.id,
                 verdict=Verdict.PASS,
                 reason=f"Average turnover Rs {avg_val:,.2f} meets or exceeds required threshold Rs {threshold:,.2f}.",
-                bounding_box=first_box,
-                source_kind=source_kind,
+                evidence_page=first_field.page,
+                evidence_quote=first_field.quote,
+                source_kind="vision" if is_vision else "text_layer",
+                bounding_box=getattr(first_field, "bounding_box", None),
             )
-        
+
+        # CRITICAL SAFETY RULE: Scan-derived data must NEVER produce an automatic FAIL
         if is_vision:
             return CriterionResult(
                 bidder_name="",
                 criterion_id=criterion.id,
                 verdict=Verdict.REVIEW,
-                reason="Value read from scanned image; officer must confirm.",
-                bounding_box=first_box,
+                reason="Value read from scanned image; officer must confirm",
+                evidence_page=first_field.page,
+                evidence_quote=first_field.quote,
                 source_kind="vision",
+                bounding_box=getattr(first_field, "bounding_box", None),
             )
 
         res = CriterionResult(
@@ -221,8 +264,6 @@ def evaluate(criterion: Criterion, evidence: BidderEvidence) -> CriterionResult:
             criterion_id=criterion.id,
             verdict=Verdict.FAIL,
             reason=f"Average turnover Rs {avg_val:,.2f} is below required threshold Rs {threshold:,.2f}.",
-            bounding_box=first_box,
-            source_kind=source_kind,
         )
         res.speaking_order_line = line_for(bidder_name, criterion, res)
         return res
