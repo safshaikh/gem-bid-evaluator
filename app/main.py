@@ -26,9 +26,10 @@ from app.jobs import (
 )
 from app.matrix import build_matrix, to_csv, to_html
 from app.pdf_report import generate_pdf_report
-from app.pdf_text import extract_pages
+from app.pdf_text import extract_pages, has_text_layer
 from app.resolver import resolve_criteria, resolve_void_list
 from app.rules import evaluate
+import app.vision_client as vision_client
 from app.schemas import (
     AtcClause,
     AtcFlag,
@@ -140,8 +141,17 @@ def _run_pipeline(tender: Tender) -> EvaluationResult:
     all_results: List[CriterionResult] = []
     for bidder in tender.bidders:
         bidder_pages = [p for d in bidder.documents for p in d.pages]
-        evidence = gemini_client.extract_bidder_evidence(bidder_pages, bidder.name, merged_criteria)
-        evidence.fields = apply_guard(evidence.fields, bidder_pages)
+        
+        # Fallback order: text layer first (cheap, verifiable). Vision only when no text layer.
+        if has_text_layer(bidder_pages):
+            evidence = gemini_client.extract_bidder_evidence(bidder_pages, bidder.name, merged_criteria)
+            evidence.fields = apply_guard(evidence.fields, bidder_pages)
+        else:
+            combined_bytes = b"".join(d.bytes_data for d in bidder.documents)
+            num_pages = sum(len(d.pages) for d in bidder.documents) or 1
+            evidence = vision_client.extract_bidder_evidence_vision(
+                combined_bytes, bidder.name, merged_criteria, num_pages=num_pages
+            )
 
         for crit in merged_criteria:
             res = evaluate(crit, evidence)

@@ -21,6 +21,8 @@ export interface CriterionResult {
   evidence_page?: number | null;
   evidence_quote?: string | null;
   speaking_order_line?: string | null;
+  bounding_box?: number[] | null;
+  source_kind?: string | null;
 }
 
 export interface OfficerOverride {

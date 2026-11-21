@@ -36,6 +36,14 @@ def evaluate(criterion: Criterion, evidence: BidderEvidence) -> CriterionResult:
                 verdict=Verdict.PASS,
                 reason="Required document is uploaded and present in bidder pack.",
             )
+        if any(d.source_kind == "vision" for d in evidence.documents_present) or any(f.source_kind == "vision" for f in evidence.fields):
+            return CriterionResult(
+                bidder_name="",
+                criterion_id=criterion.id,
+                verdict=Verdict.REVIEW,
+                reason="Value read from scanned image; officer must confirm.",
+                source_kind="vision",
+            )
         res = CriterionResult(
             bidder_name="",
             criterion_id=criterion.id,
@@ -54,6 +62,14 @@ def evaluate(criterion: Criterion, evidence: BidderEvidence) -> CriterionResult:
                 criterion_id=criterion.id,
                 verdict=Verdict.PASS,
                 reason="Undertaking document is present in bidder pack.",
+            )
+        if any(d.source_kind == "vision" for d in evidence.documents_present) or any(f.source_kind == "vision" for f in evidence.fields):
+            return CriterionResult(
+                bidder_name="",
+                criterion_id=criterion.id,
+                verdict=Verdict.REVIEW,
+                reason="Value read from scanned image; officer must confirm.",
+                source_kind="vision",
             )
         res = CriterionResult(
             bidder_name="",
@@ -76,6 +92,14 @@ def evaluate(criterion: Criterion, evidence: BidderEvidence) -> CriterionResult:
                 criterion_id=criterion.id,
                 verdict=Verdict.PASS,
                 reason="OEM authorisation document is present in bidder pack.",
+            )
+        if any(d.source_kind == "vision" for d in evidence.documents_present) or any(f.source_kind == "vision" for f in evidence.fields):
+            return CriterionResult(
+                bidder_name="",
+                criterion_id=criterion.id,
+                verdict=Verdict.REVIEW,
+                reason="Value read from scanned image; officer must confirm.",
+                source_kind="vision",
             )
         res = CriterionResult(
             bidder_name="",
@@ -107,23 +131,40 @@ def evaluate(criterion: Criterion, evidence: BidderEvidence) -> CriterionResult:
             val = parse_count(field.raw_text) or 0
         threshold = criterion.threshold or 0.0
         if val >= threshold:
-            return CriterionResult(
+            res = CriterionResult(
                 bidder_name="",
                 criterion_id=criterion.id,
                 verdict=Verdict.PASS,
                 reason=f"Verified count {int(val)} meets or exceeds required threshold {int(threshold)}.",
                 evidence_page=field.page,
                 evidence_quote=field.quote,
+                bounding_box=field.bounding_box,
+                source_kind=field.source_kind,
             )
-        res = CriterionResult(
-            bidder_name="",
-            criterion_id=criterion.id,
-            verdict=Verdict.FAIL,
-            reason=f"Verified count {int(val)} is below required threshold {int(threshold)}.",
-            evidence_page=field.page,
-            evidence_quote=field.quote,
-        )
-        res.speaking_order_line = line_for(bidder_name, criterion, res)
+        else:
+            if field.source_kind == "vision":
+                res = CriterionResult(
+                    bidder_name="",
+                    criterion_id=criterion.id,
+                    verdict=Verdict.REVIEW,
+                    reason="Value read from scanned image; officer must confirm.",
+                    evidence_page=field.page,
+                    evidence_quote=field.quote,
+                    bounding_box=field.bounding_box,
+                    source_kind=field.source_kind,
+                )
+            else:
+                res = CriterionResult(
+                    bidder_name="",
+                    criterion_id=criterion.id,
+                    verdict=Verdict.FAIL,
+                    reason=f"Verified count {int(val)} is below required threshold {int(threshold)}.",
+                    evidence_page=field.page,
+                    evidence_quote=field.quote,
+                    bounding_box=field.bounding_box,
+                    source_kind=field.source_kind,
+                )
+                res.speaking_order_line = line_for(bidder_name, criterion, res)
         return res
 
     # Rule: MIN_AVG_VALUE
@@ -151,18 +192,37 @@ def evaluate(criterion: Criterion, evidence: BidderEvidence) -> CriterionResult:
 
         avg_val = sum(yearly_values) / len(yearly_values)
         threshold = criterion.threshold or 0.0
+        is_vision = any(f.source_kind == "vision" for f in valid_fields)
+        first_box = valid_fields[0].bounding_box if valid_fields else None
+        source_kind = "vision" if is_vision else "text_layer"
+
         if avg_val >= threshold:
             return CriterionResult(
                 bidder_name="",
                 criterion_id=criterion.id,
                 verdict=Verdict.PASS,
                 reason=f"Average turnover Rs {avg_val:,.2f} meets or exceeds required threshold Rs {threshold:,.2f}.",
+                bounding_box=first_box,
+                source_kind=source_kind,
             )
+        
+        if is_vision:
+            return CriterionResult(
+                bidder_name="",
+                criterion_id=criterion.id,
+                verdict=Verdict.REVIEW,
+                reason="Value read from scanned image; officer must confirm.",
+                bounding_box=first_box,
+                source_kind="vision",
+            )
+
         res = CriterionResult(
             bidder_name="",
             criterion_id=criterion.id,
             verdict=Verdict.FAIL,
             reason=f"Average turnover Rs {avg_val:,.2f} is below required threshold Rs {threshold:,.2f}.",
+            bounding_box=first_box,
+            source_kind=source_kind,
         )
         res.speaking_order_line = line_for(bidder_name, criterion, res)
         return res

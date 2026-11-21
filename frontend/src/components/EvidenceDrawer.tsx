@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { X, ShieldAlert, CheckCircle, FileText, Scale, Loader2, UserCheck, AlertTriangle } from 'lucide-react';
+import { X, ShieldAlert, CheckCircle, FileText, Scale, Loader2, UserCheck, AlertTriangle, Scan, Camera, Eye } from 'lucide-react';
 import { Criterion, CriterionResult, OfficerOverride, Verdict } from '../types';
 import { submitOverride } from '../api';
 
@@ -133,23 +133,105 @@ export const EvidenceDrawer: React.FC<EvidenceDrawerProps> = ({
             </div>
 
             {/* Cited Bidder Evidence */}
-            <div className="p-4 rounded-lg bg-white border border-slate-200 space-y-2">
-              <span className="font-bold text-slate-800 text-xs uppercase tracking-wider flex items-center">
-                <FileText className="w-4 h-4 mr-1.5 text-slate-600" />
-                Bidder Document Evidence Quote
-              </span>
+            <div className="p-4 rounded-lg bg-white border border-slate-200 space-y-3">
+              <div className="flex items-center justify-between">
+                <span className="font-bold text-slate-800 text-xs uppercase tracking-wider flex items-center">
+                  <FileText className="w-4 h-4 mr-1.5 text-slate-600" />
+                  Bidder Document Evidence Quote
+                </span>
+                {result?.source_kind === 'vision' ? (
+                  <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-semibold bg-amber-100 text-amber-800 border border-amber-300">
+                    <Scan className="w-3 h-3 mr-1 text-amber-600" />
+                    Read from scanned image (Gemini Multimodal Vision)
+                  </span>
+                ) : (
+                  <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-semibold bg-emerald-100 text-emerald-800 border border-emerald-300">
+                    <CheckCircle className="w-3 h-3 mr-1 text-emerald-600" />
+                    Verified Text Layer
+                  </span>
+                )}
+              </div>
+
               {result?.evidence_quote ? (
                 <div className="space-y-2">
                   <div className="p-3 bg-indigo-50/50 rounded-lg border border-indigo-100 text-xs font-mono text-indigo-950">
                     &ldquo;{result.evidence_quote}&rdquo;
                   </div>
-                  <div className="text-xs text-slate-500 flex items-center space-x-3">
-                    <span>Cited Page: <b>Page {result.evidence_page || 1}</b></span>
-                    <span>&bull;</span>
-                    <span className="text-emerald-700 font-semibold flex items-center">
-                      <CheckCircle className="w-3.5 h-3.5 mr-1" /> Verified against PDF text layer
-                    </span>
+                  <div className="text-xs text-slate-500 flex items-center justify-between">
+                    <div className="flex items-center space-x-2">
+                      <span>Cited Page: <b>Page {result.evidence_page || 1}</b></span>
+                      <span>&bull;</span>
+                      {result?.source_kind === 'vision' ? (
+                        <span className="text-amber-700 font-medium flex items-center">
+                          <Eye className="w-3.5 h-3.5 mr-1" /> Dual Independent Extraction Agreement
+                        </span>
+                      ) : (
+                        <span className="text-emerald-700 font-semibold flex items-center">
+                          <CheckCircle className="w-3.5 h-3.5 mr-1" /> Verified against PDF text layer
+                        </span>
+                      )}
+                    </div>
+                    {result?.bounding_box && (
+                      <span className="font-mono text-[10px] bg-slate-100 px-1.5 py-0.5 rounded border text-slate-600">
+                        Box: [{result.bounding_box.join(', ')}]
+                      </span>
+                    )}
                   </div>
+
+                  {/* Bounding Box Visual Overlay Preview (when vision box is available) */}
+                  {result?.bounding_box && result.bounding_box.length === 4 && (
+                    <div className="mt-3 p-3 bg-slate-50 rounded-lg border border-slate-200">
+                      <div className="flex items-center justify-between mb-2">
+                        <span className="text-[11px] font-semibold text-slate-700 flex items-center">
+                          <Camera className="w-3.5 h-3.5 mr-1 text-indigo-600" />
+                          Visual Document Localization (0-1000 scale)
+                        </span>
+                        <span className="text-[10px] text-slate-400 font-mono">
+                          y:[{result.bounding_box[0]},{result.bounding_box[2]}] x:[{result.bounding_box[1]},{result.bounding_box[3]}]
+                        </span>
+                      </div>
+                      <div className="relative w-full h-36 bg-white border border-slate-300 rounded shadow-xs overflow-hidden flex flex-col justify-between p-2">
+                        {/* Simulated page skeleton lines */}
+                        <div className="space-y-1.5 opacity-30">
+                          <div className="h-1.5 bg-slate-400 rounded w-1/3"></div>
+                          <div className="h-1 bg-slate-300 rounded w-full"></div>
+                          <div className="h-1 bg-slate-300 rounded w-5/6"></div>
+                          <div className="h-1 bg-slate-300 rounded w-4/6"></div>
+                          <div className="h-1 bg-slate-300 rounded w-full"></div>
+                        </div>
+                        <div className="space-y-1.5 opacity-30">
+                          <div className="h-1 bg-slate-300 rounded w-3/4"></div>
+                          <div className="h-1 bg-slate-300 rounded w-full"></div>
+                          <div className="h-1.5 bg-slate-400 rounded w-1/2"></div>
+                        </div>
+
+                        {/* Normalized Bounding Box Overlay Box */}
+                        <div
+                          className="absolute border-2 border-indigo-600 bg-indigo-500/20 rounded shadow-sm flex items-center justify-center transition-all"
+                          style={{
+                            top: `${(result.bounding_box[0] / 10).toFixed(1)}%`,
+                            left: `${(result.bounding_box[1] / 10).toFixed(1)}%`,
+                            height: `${(Math.max(result.bounding_box[2] - result.bounding_box[0], 50) / 10).toFixed(1)}%`,
+                            width: `${(Math.max(result.bounding_box[3] - result.bounding_box[1], 100) / 10).toFixed(1)}%`,
+                          }}
+                        >
+                          <span className="text-[9px] font-bold bg-indigo-700 text-white px-1 py-0.2 rounded shadow-xs whitespace-nowrap">
+                            Detected Field
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Scan Safety Notice if Vision */}
+                  {result?.source_kind === 'vision' && (
+                    <div className="p-2.5 rounded bg-amber-50/80 border border-amber-200 text-amber-900 text-[11px] leading-relaxed flex items-start space-x-2">
+                      <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                      <div>
+                        <b>Statutory Scan Invariant:</b> Extracted from scanned raster imagery. Deterministic safety rules forbid automatic rejections on scanned evidence without officer verification.
+                      </div>
+                    </div>
+                  )}
                 </div>
               ) : (
                 <p className="text-xs text-slate-400 italic">No direct textual quote was cited by the bidder submission.</p>

@@ -57,6 +57,7 @@ class DocumentPresent(BaseModel):
     doc_type: str
     page: int
     quote: str
+    source_kind: str = "text_layer"  # "text_layer" | "vision"
 
 
 class ExtractedField(BaseModel):
@@ -68,6 +69,8 @@ class ExtractedField(BaseModel):
     quote: str
     raw_text: str
     value: Optional[Union[float, int, str]] = None
+    bounding_box: Optional[List[int]] = None  # [ymin, xmin, ymax, xmax] 0-1000
+    source_kind: str = "text_layer"  # "text_layer" | "vision"
 
 
 class BidderEvidence(BaseModel):
@@ -100,6 +103,8 @@ class CriterionResult(BaseModel):
     evidence_page: Optional[int] = None
     evidence_quote: Optional[str] = None
     speaking_order_line: Optional[str] = None
+    bounding_box: Optional[List[int]] = None
+    source_kind: Optional[str] = "text_layer"
 
 
 class VoidListItem(BaseModel):
