@@ -92,23 +92,27 @@ Verify verdict stability across multiple runs:
 
 ---
 
-## Cloud Run Deployment
+## Persistence & Storage Architecture
 
-Deploy to Google Cloud Run (region `asia-south1`):
+BidParakh utilizes a standard library SQLite database (`app/db.py`) and a content-addressable local vault (`app/storage.py`) for tender persistence, replay caching, officer overrides, and tamper-evident audit logging.
 
-```bash
-gcloud run deploy gem-bid-evaluator \
-  --source . \
-  --region asia-south1 \
-  --allow-unauthenticated \
-  --min-instances 1 \
-  --max-instances 3 \
-  --memory 1Gi \
-  --timeout 300 \
-  --set-env-vars GEMINI_MODEL=gemini-3.8-flash,GEMINI_FALLBACK_MODEL=gemini-3.5-flash-lite,GEMINI_API_KEY=<paste key at deploy time, never commit it>
-```
+> [!WARNING]
+> **Ephemeral Storage on Google Cloud Run:**
+> SQLite and the local file vault (`data/vault/`) on Cloud Run are **ephemeral**. Any instance restart or redeployment resets local disk contents.
+> 
+> - **Hackathon / Single-Instance Deployment:** Keep `--max-instances 1` on Cloud Run so all requests route to the same container instance.
+> - **Production Roadmap:** True production environments require managed Cloud SQL (PostgreSQL) and a Google Cloud Storage (GCS) bucket for the document vault. PostgreSQL support is planned for future phases behind the database abstraction layer.
 
-> **Deployment Notes:**
-> - The `gemini_api_key.txt` file is for local development only. On Cloud Run the key is supplied via the `GEMINI_API_KEY` environment variable. The file is excluded by `.dockerignore` so it is never baked into the container image.
-> - Keep `--min-instances 1` during live judging to eliminate cold starts. After judging, redeploy with `--min-instances 0` to stop idle billing.
+### Environment Variables
+
+| Variable | Default | Purpose |
+| :--- | :--- | :--- |
+| `DATABASE_PATH` | `data/bidparakh.db` | File path for SQLite database. Created automatically if missing. |
+| `VAULT_DIR` | `data/vault` | Content-addressable directory storing uploaded PDFs by SHA-256 digest. |
+| `GCS_BUCKET` | *(unset)* | Google Cloud Storage bucket for document storage. If unset, uses local vault. |
+| `AUTH_ENABLED` | `false` | When `false`, demo mode runs with zero login friction (`demo-officer`). When `true`, requires JWT HS256 authentication. |
+| `JWT_SECRET` | *(unset)* | Secret key for signing and verifying JWT tokens when `AUTH_ENABLED=true`. |
+| `GEMINI_MODEL` | `gemini-3.8-flash` | Primary Gemini model for extraction and multimodal vision. |
+| `GEMINI_FALLBACK_MODEL` | `gemini-3.5-flash-lite` | Secondary fallback model. |
+
 

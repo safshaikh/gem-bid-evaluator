@@ -4,6 +4,10 @@ __pycache__/
 .pytest_cache/
 cache/
 uploads/
+data/
+*.db
+*.db-shm
+*.db-wal
 *.pyc
 .venv/
 node_modules/

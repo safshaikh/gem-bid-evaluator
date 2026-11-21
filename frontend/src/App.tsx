@@ -5,9 +5,27 @@ import { VerdictMatrix } from './components/VerdictMatrix';
 import { EvidenceDrawer } from './components/EvidenceDrawer';
 import { SpeakingOrdersList } from './components/SpeakingOrdersList';
 import { AtcLegalityReview } from './components/AtcLegalityReview';
-import { checkHealth, getMatrixCsvUrl, getPdfReportUrl, loadDemoTender } from './api';
+import { PastTendersSelector } from './components/PastTendersSelector';
+import { AuditTrailModal } from './components/AuditTrailModal';
+import { LoginModal } from './components/LoginModal';
+import {
+  checkHealth,
+  fetchConfig,
+  fetchTender,
+  getMatrixCsvUrl,
+  getPdfReportUrl,
+  loadDemoTender,
+} from './api';
 import { Criterion, CriterionResult, EvaluationResult, OfficerOverride } from './types';
-import { Download, FileText, LayoutGrid, Scale, FileSpreadsheet, RefreshCw } from 'lucide-react';
+import {
+  Download,
+  FileText,
+  LayoutGrid,
+  Scale,
+  FileSpreadsheet,
+  RefreshCw,
+  ShieldCheck,
+} from 'lucide-react';
 
 export const App: React.FC = () => {
   const [evaluation, setEvaluation] = useState<EvaluationResult | null>(null);
@@ -18,9 +36,19 @@ export const App: React.FC = () => {
     result?: CriterionResult;
     override?: OfficerOverride;
   } | null>(null);
+  const [isAuditModalOpen, setIsAuditModalOpen] = useState(false);
+  const [isLoginModalOpen, setIsLoginModalOpen] = useState(false);
 
-  // Auto-load demo on initial load so user/judge immediately sees working system!
+  // Check auth and auto-load initial demo case
   useEffect(() => {
+    fetchConfig()
+      .then((cfg) => {
+        if (cfg.auth_enabled && !localStorage.getItem('bidparakh_jwt')) {
+          setIsLoginModalOpen(true);
+        }
+      })
+      .catch(() => {});
+
     checkHealth()
       .then(() => {
         loadDemoTender()
@@ -35,9 +63,20 @@ export const App: React.FC = () => {
     setActiveTab('matrix');
   };
 
+  const handleSelectPastTender = async (tenderId: string) => {
+    try {
+      const data = await fetchTender(tenderId);
+      if (data.evaluation) {
+        setEvaluation(data.evaluation);
+        setActiveTab('matrix');
+      }
+    } catch (err) {
+      console.error('Failed loading past tender:', err);
+    }
+  };
+
   const handleOverrideSaved = (updated: EvaluationResult) => {
     setEvaluation(updated);
-    // Update selected cell override if open
     if (selectedCell) {
       const newOverride = updated.overrides.find(
         (o) => o.criterion_id === selectedCell.criterion.id && o.bidder_name === selectedCell.bidderName
@@ -53,6 +92,30 @@ export const App: React.FC = () => {
       <Navbar tenderId={evaluation?.tender_id} cached={evaluation?.cached} degraded={evaluation?.degraded} />
 
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-6">
+        {/* Workspace Toolbar: Past Tenders & Quick Actions */}
+        <div className="bg-white p-3.5 rounded-xl border border-slate-200 shadow-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="flex items-center space-x-3">
+            <PastTendersSelector
+              currentTenderId={evaluation?.tender_id || null}
+              onSelectTender={handleSelectPastTender}
+              onNewTender={() => setActiveTab('new_upload')}
+            />
+          </div>
+
+          <div className="flex items-center space-x-2">
+            {evaluation?.tender_id && (
+              <button
+                type="button"
+                onClick={() => setIsAuditModalOpen(true)}
+                className="inline-flex items-center px-3 py-1.5 rounded-lg border border-indigo-200 bg-indigo-50/70 text-indigo-700 text-xs font-semibold hover:bg-indigo-100 transition-colors shadow-2xs"
+              >
+                <ShieldCheck className="w-3.5 h-3.5 mr-1.5 text-indigo-600" />
+                Audit Trail &amp; Hash Chain
+              </button>
+            )}
+          </div>
+        </div>
+
         {/* Navigation & Action Bar */}
         <div className="flex flex-col md:flex-row md:items-center justify-between pb-2 border-b border-slate-200 gap-4">
           <div className="flex items-center space-x-2">
@@ -61,7 +124,7 @@ export const App: React.FC = () => {
               onClick={() => setActiveTab('matrix')}
               className={`inline-flex items-center px-4 py-2 rounded-lg text-xs font-bold transition-all ${
                 activeTab === 'matrix'
-                  ? 'bg-slate-900 text-white shadow-sm'
+                  ? 'bg-slate-900 text-white shadow-xs'
                   : 'bg-white text-slate-600 hover:bg-slate-100 border border-slate-200'
               }`}
             >
@@ -74,7 +137,7 @@ export const App: React.FC = () => {
               onClick={() => setActiveTab('speaking_orders')}
               className={`inline-flex items-center px-4 py-2 rounded-lg text-xs font-bold transition-all ${
                 activeTab === 'speaking_orders'
-                  ? 'bg-slate-900 text-white shadow-sm'
+                  ? 'bg-slate-900 text-white shadow-xs'
                   : 'bg-white text-slate-600 hover:bg-slate-100 border border-slate-200'
               }`}
             >
@@ -87,7 +150,7 @@ export const App: React.FC = () => {
               onClick={() => setActiveTab('atc')}
               className={`inline-flex items-center px-4 py-2 rounded-lg text-xs font-bold transition-all ${
                 activeTab === 'atc'
-                  ? 'bg-slate-900 text-white shadow-sm'
+                  ? 'bg-slate-900 text-white shadow-xs'
                   : 'bg-white text-slate-600 hover:bg-slate-100 border border-slate-200'
               }`}
             >
@@ -100,7 +163,7 @@ export const App: React.FC = () => {
               onClick={() => setActiveTab('new_upload')}
               className={`inline-flex items-center px-4 py-2 rounded-lg text-xs font-bold transition-all ${
                 activeTab === 'new_upload'
-                  ? 'bg-slate-900 text-white shadow-sm'
+                  ? 'bg-slate-900 text-white shadow-xs'
                   : 'bg-white text-slate-600 hover:bg-slate-100 border border-slate-200'
               }`}
             >
@@ -124,7 +187,7 @@ export const App: React.FC = () => {
                 href={getPdfReportUrl(evaluation.tender_id)}
                 target="_blank"
                 rel="noreferrer"
-                className="inline-flex items-center px-3.5 py-2 rounded-lg text-xs font-semibold bg-indigo-600 text-white hover:bg-indigo-700 shadow-sm"
+                className="inline-flex items-center px-3.5 py-2 rounded-lg text-xs font-semibold bg-indigo-600 text-white hover:bg-indigo-700 shadow-xs"
               >
                 <Download className="w-4 h-4 mr-1.5" />
                 Executive PDF Report
@@ -175,7 +238,23 @@ export const App: React.FC = () => {
           onOverrideSaved={handleOverrideSaved}
         />
       )}
+
+      {/* Tamper-Evident Audit Trail Modal */}
+      {evaluation?.tender_id && (
+        <AuditTrailModal
+          tenderId={evaluation.tender_id}
+          isOpen={isAuditModalOpen}
+          onClose={() => setIsAuditModalOpen(false)}
+        />
+      )}
+
+      {/* Optional Auth Login Modal */}
+      <LoginModal
+        isOpen={isLoginModalOpen}
+        onSuccess={() => setIsLoginModalOpen(false)}
+      />
     </div>
   );
 };
+
 export default App;

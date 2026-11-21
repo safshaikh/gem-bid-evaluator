@@ -3,15 +3,33 @@
 from datetime import datetime, timezone
 import html
 import json
+import logging
 from pathlib import Path
-from typing import List
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile, status
+from typing import List, Optional
+import uuid
+from fastapi import FastAPI, File, Form, HTTPException, Request, Response, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from app.atc_flag import flag_clause
+from app.auth import (
+    authenticate_user,
+    create_access_token,
+    decode_access_token,
+    is_auth_enabled,
+)
 from app.config import get_fallback_model, get_model, is_ai_configured
+from app.db import (
+    db_get_latest_evaluation,
+    db_get_overrides,
+    db_get_tender_audit,
+    db_get_tender_details,
+    db_list_tenders,
+    db_save_override,
+    init_db,
+    verify_audit_chain,
+)
 from app.evidence_guard import apply_guard
 import app.gemini_client as gemini_client
 from app.jobs import (
@@ -22,6 +40,9 @@ from app.jobs import (
     create_tender,
     get_tender,
     load_cached,
+    persist_bidder,
+    persist_bidder_document,
+    persist_tender_document,
     save_cached,
 )
 from app.matrix import build_matrix, to_csv, to_html
@@ -59,6 +80,75 @@ app.add_middleware(
 )
 
 
+logger = logging.getLogger(__name__)
+
+
+@app.on_event("startup")
+def on_startup() -> None:
+    """Initialize database tables and migrations on application startup."""
+    try:
+        init_db()
+        logger.info("Database initialized successfully.")
+    except Exception as exc:
+        logger.error(f"Failed to initialize database: {exc}")
+
+
+def get_actor(request: Request, require_write: bool = False) -> dict:
+    """Extract and validate acting user based on AUTH_ENABLED flag."""
+    if not is_auth_enabled():
+        return {
+            "username": request.headers.get("X-Actor") or "demo-officer",
+            "role": "admin",
+        }
+
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.startswith("Bearer "):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required. Please provide Bearer token.",
+        )
+
+    token = auth_header[7:].strip()
+    payload = decode_access_token(token)
+    if not payload:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired access token.",
+        )
+
+    role = payload.get("role", "procurement_officer")
+    if require_write and role == "auditor":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Auditor role is read-only and cannot perform modifications.",
+        )
+
+    return {"username": payload.get("sub", "officer"), "role": role}
+
+
+@app.get("/config")
+def get_config_endpoint() -> dict:
+    """Return runtime configuration flags for frontend UI."""
+    return {
+        "auth_enabled": is_auth_enabled(),
+    }
+
+
+@app.post("/auth/login")
+async def login_endpoint(request: Request) -> dict:
+    """Authenticate and issue JWT token when AUTH_ENABLED=true."""
+    if not is_auth_enabled():
+        return {"access_token": "demo-token", "token_type": "bearer", "role": "admin"}
+    body = await request.json()
+    username = body.get("username", "")
+    password = body.get("password", "")
+    user = authenticate_user(username, password)
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+    token = create_access_token({"sub": user["username"], "role": user["role"]})
+    return {"access_token": token, "token_type": "bearer", "role": user["role"]}
+
+
 @app.get("/health")
 def health() -> dict:
     """Return application health status and AI configuration."""
@@ -67,22 +157,98 @@ def health() -> dict:
         "ai_configured": is_ai_configured(),
         "model": get_model(),
         "fallback_model": get_fallback_model(),
+        "auth_enabled": is_auth_enabled(),
     }
 
 
+@app.get("/tenders")
+def list_tenders_endpoint(request: Request) -> List[dict]:
+    """List all stored tenders with bidder counts and evaluation status."""
+    actor_info = get_actor(request)
+    tenders = db_list_tenders()
+    if is_auth_enabled() and actor_info.get("role") == "procurement_officer":
+        username = actor_info.get("username")
+        tenders = [t for t in tenders if t.get("actor") == username]
+    return tenders
+
+
+@app.get("/tenders/{tender_id}")
+def get_tender_endpoint(tender_id: str, request: Request) -> dict:
+    """Get full tender details including documents, bidders, evaluation, and overrides."""
+    actor_info = get_actor(request)
+    details = db_get_tender_details(tender_id)
+    tender = get_tender(tender_id)
+    if not details and not tender:
+        raise HTTPException(status_code=404, detail=f"Tender {tender_id} not found")
+
+    if is_auth_enabled() and actor_info.get("role") == "procurement_officer":
+        owner = details.get("actor") if details else getattr(tender, "actor", "")
+        if owner and owner != actor_info.get("username"):
+            raise HTTPException(status_code=403, detail="Forbidden: You do not own this tender.")
+
+    eval_data = None
+    if tender and tender.evaluation_result:
+        eval_data = tender.evaluation_result
+    else:
+        eval_row = db_get_latest_evaluation(tender_id)
+        if eval_row:
+            try:
+                eval_data = json.loads(eval_row["result_json"])
+            except Exception:
+                pass
+
+    overrides = db_get_overrides(tender_id)
+
+    return {
+        "tender_id": tender_id,
+        "title": details.get("title", "") if details else "",
+        "status": details.get("status", "not_evaluated") if details else "not_evaluated",
+        "created_at": details.get("created_at") if details else "",
+        "documents": details.get("documents", []) if details else [{"filename": d.name} for d in tender.documents],
+        "bidders": details.get("bidders", []) if details else [{"name": b.name, "documents": [{"filename": d.name} for d in b.documents]} for b in tender.bidders],
+        "evaluation": eval_data,
+        "overrides": overrides,
+    }
+
+
+@app.get("/tenders/{tender_id}/audit")
+def get_tender_audit_endpoint(tender_id: str, request: Request) -> List[dict]:
+    """Get tamper-evident audit history for a specific tender."""
+    get_actor(request)
+    return db_get_tender_audit(tender_id)
+
+
+@app.get("/audit/verify")
+def verify_audit_endpoint(request: Request) -> dict:
+    """Verify cryptographic hash chain integrity of the audit log."""
+    get_actor(request)
+    return verify_audit_chain()
+
+
 @app.post("/tenders")
-async def create_tender_endpoint(files: List[UploadFile] = File(...)) -> dict:
+async def create_tender_endpoint(request: Request, files: List[UploadFile] = File(...)) -> dict:
     """Upload tender PDFs preserving order (main bid first, then corrigenda)."""
+    actor_info = get_actor(request, require_write=True)
+    actor = actor_info["username"]
+
     if not files:
         raise HTTPException(status_code=400, detail="No files provided")
 
-    tender = create_tender()
-    for f in files:
+    tender = create_tender(actor=actor, title=files[0].filename if files else "")
+    for idx, f in enumerate(files):
         if not f.filename.lower().endswith(".pdf"):
             raise HTTPException(status_code=400, detail="Only PDF files are accepted")
         content = await f.read()
         pages = extract_pages(content)
-        tender.documents.append(UploadedDoc(name=f.filename, bytes_data=content, pages=pages))
+        doc = persist_tender_document(
+            tender_id=tender.tender_id,
+            filename=f.filename,
+            bytes_data=content,
+            pages=pages,
+            order_index=idx,
+            actor=actor,
+        )
+        tender.documents.append(doc)
 
     total_pages = sum(len(d.pages) for d in tender.documents)
     return {
@@ -95,21 +261,34 @@ async def create_tender_endpoint(files: List[UploadFile] = File(...)) -> dict:
 @app.post("/tenders/{tender_id}/bidders")
 async def add_bidder_endpoint(
     tender_id: str,
+    request: Request,
     name: str = Form(...),
     files: List[UploadFile] = File(...),
 ) -> dict:
     """Add a bidder pack with evidence PDFs to a tender."""
+    actor_info = get_actor(request, require_write=True)
+    actor = actor_info["username"]
+
     tender = get_tender(tender_id)
     if not tender:
         raise HTTPException(status_code=404, detail=f"Tender {tender_id} not found")
 
+    bidder_id = persist_bidder(tender_id=tender_id, name=name, actor=actor)
     docs: List[UploadedDoc] = []
     for f in files:
         if not f.filename.lower().endswith(".pdf"):
             raise HTTPException(status_code=400, detail="Only PDF files are accepted")
         content = await f.read()
         pages = extract_pages(content)
-        docs.append(UploadedDoc(name=f.filename, bytes_data=content, pages=pages))
+        doc = persist_bidder_document(
+            bidder_id=bidder_id,
+            tender_id=tender_id,
+            filename=f.filename,
+            bytes_data=content,
+            pages=pages,
+            actor=actor,
+        )
+        docs.append(doc)
 
     tender.bidders.append(BidderPack(name=name, documents=docs))
     return {
@@ -208,13 +387,13 @@ def evaluate_tender_endpoint(tender_id: str) -> EvaluationResult:
             ],
             warnings=["AINotConfigured"],
         )
-        save_cached(ckey, degraded_res)
+        save_cached(ckey, degraded_res, tender_id=tender.tender_id)
         tender.evaluation_result = degraded_res
         return degraded_res
 
     try:
         eval_res = _run_pipeline(tender)
-        save_cached(ckey, eval_res)
+        save_cached(ckey, eval_res, tender_id=tender.tender_id, model_id=get_model())
         tender.evaluation_result = eval_res
         return eval_res
     except Exception as exc:
@@ -237,7 +416,7 @@ def evaluate_tender_endpoint(tender_id: str) -> EvaluationResult:
             ],
             warnings=[exc_name],
         )
-        save_cached(ckey, degraded_res)
+        save_cached(ckey, degraded_res, tender_id=tender.tender_id)
         tender.evaluation_result = degraded_res
         return degraded_res
 
@@ -373,8 +552,11 @@ def view_report_endpoint(tender_id: str) -> HTMLResponse:
 
 
 @app.post("/tenders/{tender_id}/override", response_model=EvaluationResult)
-def override_verdict_endpoint(tender_id: str, req: OverrideRequest) -> EvaluationResult:
+def override_verdict_endpoint(tender_id: str, req: OverrideRequest, request: Request) -> EvaluationResult:
     """Record an officer manual verdict override with statutory justification without mutating rule verdicts."""
+    actor_info = get_actor(request, require_write=True)
+    actor = req.officer_name or actor_info["username"]
+
     tender = get_tender(tender_id)
     if not tender:
         raise HTTPException(status_code=404, detail=f"Tender {tender_id} not found")
@@ -402,13 +584,16 @@ def override_verdict_endpoint(tender_id: str, req: OverrideRequest) -> Evaluatio
             detail=f"Result not found for criterion '{req.criterion_id}' and bidder '{req.bidder_name}'.",
         )
 
+    old_verdict_str = str(orig_res.verdict.value if hasattr(orig_res.verdict, "value") else orig_res.verdict)
+    new_verdict_str = str(req.new_verdict.value if hasattr(req.new_verdict, "value") else req.new_verdict)
+
     override = OfficerOverride(
         criterion_id=req.criterion_id,
         bidder_name=req.bidder_name,
         old_verdict=orig_res.verdict,
         new_verdict=req.new_verdict,
         justification=justification,
-        officer_name=req.officer_name or "Procurement Officer",
+        officer_name=actor,
         timestamp=datetime.now(timezone.utc).isoformat(),
     )
 
@@ -416,9 +601,24 @@ def override_verdict_endpoint(tender_id: str, req: OverrideRequest) -> Evaluatio
     tender.overrides.append(override)
     tender.evaluation_result.overrides.append(override)
 
+    # Persist to database overrides table and write tamper-evident audit record
+    try:
+        db_save_override(
+            override_id=uuid.uuid4().hex,
+            tender_id=tender_id,
+            bidder_id=req.bidder_name,
+            criterion_id=req.criterion_id,
+            old_verdict=old_verdict_str,
+            new_verdict=new_verdict_str,
+            justification=justification,
+            actor=actor,
+        )
+    except Exception as exc:
+        logger.warning(f"Could not persist override to DB: {exc}")
+
     # Update cache if key exists
     ckey = cache_key(tender)
-    save_cached(ckey, tender.evaluation_result)
+    save_cached(ckey, tender.evaluation_result, tender_id=tender.tender_id, actor=actor)
 
     return tender.evaluation_result
 
@@ -620,7 +820,7 @@ def load_demo_tender() -> dict:
         warnings=[],
     )
     tender.evaluation_result = eval_res
-    save_cached(cache_key(tender), eval_res)
+    save_cached(cache_key(tender), eval_res, tender_id=tender.tender_id)
 
     return {
         "tender_id": tender.tender_id,

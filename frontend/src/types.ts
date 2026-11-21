@@ -62,3 +62,32 @@ export interface EvaluationResult {
   overrides: OfficerOverride[];
   warnings: string[];
 }
+
+export interface TenderSummary {
+  tender_id: string;
+  title: string;
+  status: string;
+  actor: string;
+  created_at: string;
+  updated_at: string;
+  bidder_count: number;
+  document_count: number;
+}
+
+export interface AuditLogRow {
+  id: number;
+  ts: string;
+  actor: string;
+  action: string;
+  tender_id: string;
+  payload_json: string;
+  prev_hash: string;
+  row_hash: string;
+}
+
+export interface AuditVerifyResult {
+  ok: boolean;
+  rows_checked: number;
+  first_broken_id: number | null;
+  reason: string | null;
+}
